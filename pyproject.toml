@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lab1-pow-ipv8"
+version = "0.1.0"
+description = "CS4160 Lab 1 PoW over IPv8 client"
+requires-python = ">=3.10"
+dependencies = [
+  "pyipv8 @ git+https://github.com/Tribler/py-ipv8.git",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
