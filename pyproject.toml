@@ -9,7 +9,11 @@ description = "CS4160 Lab 1 PoW over IPv8 client"
 requires-python = ">=3.10"
 dependencies = [
   "pyipv8 @ git+https://github.com/Tribler/py-ipv8.git",
+  "pytest>=8.0.0",
 ]
+
+[project.scripts]
+lab1 = "lab1_pow_ipv8.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

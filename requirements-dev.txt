@@ -1,1 +1,1 @@
-pytest>=8.0.0
+## Deprecated: use pyproject.toml with uv sync.
