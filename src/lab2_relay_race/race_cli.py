@@ -44,6 +44,21 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait for Lab 2 server discovery",
     )
     parser.add_argument(
+        "--group-ready-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds to wait for the pre-race GroupReady handshake",
+    )
+    parser.add_argument(
+        "--ipv8-port",
+        type=int,
+        default=None,
+        help=(
+            "Optional local IPv8 port. Useful when running three nodes on one "
+            "machine."
+        ),
+    )
+    parser.add_argument(
         "--peer",
         action="append",
         default=[],
@@ -127,8 +142,11 @@ def main() -> int:
                     udp_port=args.udp_port,
                     team_config=team_config,
                     manual_peers=manual_peers,
+                    ipv8_port=args.ipv8_port,
+                    debug_peers=args.debug,
                     discovery_timeout=args.discovery_timeout,
                     server_peer_timeout=args.server_timeout,
+                    group_ready_timeout=args.group_ready_timeout,
                 )
             )
         )

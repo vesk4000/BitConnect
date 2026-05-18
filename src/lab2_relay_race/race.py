@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 
 from lab1_pow_ipv8.libsodium_bootstrap import ensure_libsodium
 
@@ -16,14 +19,18 @@ from ipv8.configuration import (
     WalkerDefinition,
     default_bootstrap_defs,
 )
+from ipv8.messaging.interfaces.udp.endpoint import UDPv4Address
+from ipv8.peer import Peer
 from ipv8_service import IPv8
 
+from lab1_pow_ipv8.constants import LAB2_SERVER_PUBLIC_KEY_HEX
 from .community import Challenge, RoundResult, build_lab2_community
 from .ids import (
     UDP_ACK,
     UDP_BATON_PASS,
     UDP_GROUP_READY,
     UDP_NONCE_BROADCAST,
+    UDP_SERVER_HINT,
     UDP_SIGNATURE_REPLY,
 )
 from .keyutil import (
@@ -42,11 +49,13 @@ from .udp_protocol import (
     build_baton_pass_body,
     build_group_ready_body,
     build_nonce_broadcast_body,
+    build_server_hint_body,
     build_signature_reply_body,
 )
 from .udp_runtime import SignedUdpNode
 
 LOGGER = logging.getLogger("lab2_race")
+SERVER_HINT_CACHE = Path(".lab2_server_hint.json")
 
 
 @dataclass(frozen=True)
@@ -55,6 +64,9 @@ class RaceSettings:
     udp_port: int
     team_config: TeamConfig
     manual_peers: dict[str, PeerEndpoint] | None = None
+    ipv8_port: int | None = None
+    debug_peers: bool = False
+    server_hint_cache: Path = SERVER_HINT_CACHE
     discovery_timeout: float = 300.0
     server_peer_timeout: float = 30.0
     registration_timeout: float = 30.0
@@ -106,6 +118,8 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
 
     Lab2Community = build_lab2_community()
     builder = ConfigBuilder().clear_keys().clear_overlays()
+    if settings.ipv8_port is not None:
+        builder.set_port(settings.ipv8_port)
     builder.add_key("lab2", "curve25519", settings.key_file)
     builder.add_overlay(
         "Lab2Community",
@@ -126,27 +140,42 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
 
     try:
         overlay = next(o for o in ipv8.overlays if isinstance(o, Lab2Community))
-        overlay.set_local_endpoint(get_primary_outbound_ip(), settings.udp_port)
-        overlay.set_target_pubkeys(
-            [bytes.fromhex(pubkey) for pubkey in teammate_pubkeys]
-        )
-
         if settings.manual_peers is None:
+            overlay.set_local_endpoint(get_primary_outbound_ip(), settings.udp_port)
+            overlay.set_target_pubkeys(
+                [bytes.fromhex(pubkey) for pubkey in teammate_pubkeys]
+            )
             peer_map = await _discover_team_endpoints(
                 overlay,
                 teammate_members,
                 settings.discovery_timeout,
             )
         else:
+            LOGGER.info(
+                "Manual teammate endpoints configured; skipping IPv8 teammate "
+                "endpoint gossip"
+            )
             peer_map = _select_manual_team_endpoints(
                 settings.manual_peers,
                 teammate_members,
             )
         udp_node.set_peers(peer_map)
+        cached_server_hint = _walk_to_cached_server_hint(
+            overlay, settings.server_hint_cache
+        )
 
-        server_peer = await overlay.wait_for_server_peer(settings.server_peer_timeout)
+        server_peer = await _wait_for_server_peer_with_team_hints(
+            overlay=overlay,
+            udp_node=udp_node,
+            teammate_pubkeys=teammate_pubkeys,
+            timeout=settings.server_peer_timeout,
+            debug_peers=settings.debug_peers,
+            server_hint_cache=settings.server_hint_cache,
+            initial_hint=cached_server_hint,
+        )
         if server_peer is None:
             raise TimeoutError("Lab 2 server peer was not discovered")
+        udp_node.ignore_message_id(UDP_SERVER_HINT)
 
         runner = _RelayRaceSession(
             settings=settings,
@@ -156,7 +185,19 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
             server_peer=server_peer,
             udp_node=udp_node,
         )
-        return await runner.run()
+        hint_task = asyncio.create_task(
+            _broadcast_server_hint_until_stopped(
+                udp_node,
+                teammate_pubkeys,
+                server_peer,
+            )
+        )
+        try:
+            return await runner.run()
+        finally:
+            hint_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await hint_task
     finally:
         await udp_node.stop()
         await ipv8.stop()
@@ -184,6 +225,146 @@ async def _discover_team_endpoints(
             "Discovered Node %s (%s) at %s:%s", member.role, member.name, host, port
         )
     return peers
+
+
+async def _wait_for_server_peer_with_team_hints(
+    *,
+    overlay,
+    udp_node: SignedUdpNode,
+    teammate_pubkeys: list[str],
+    timeout: float,
+    debug_peers: bool,
+    server_hint_cache: Path,
+    initial_hint: tuple[str, int] | None = None,
+):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    next_log = 0.0
+    hinted_address = initial_hint
+    hinted_since = loop.time() if hinted_address is not None else None
+
+    while loop.time() < deadline:
+        server_peer = overlay.find_server_peer()
+        if server_peer is not None:
+            LOGGER.info("Discovered Lab 2 server peer")
+            _write_server_hint_cache(server_hint_cache, server_peer)
+            await _broadcast_server_hint(udp_node, teammate_pubkeys, server_peer)
+            return server_peer
+
+        if debug_peers and loop.time() >= next_log:
+            overlay._log_known_peers()
+            next_log = loop.time() + 2.0
+
+        if hinted_address is not None and hinted_since is not None:
+            if loop.time() - hinted_since >= 2.0:
+                LOGGER.warning(
+                    "Using hinted Lab 2 server endpoint after peer discovery did not verify it: %s:%s",
+                    hinted_address[0],
+                    hinted_address[1],
+                )
+                return _build_server_peer_from_hint(hinted_address)
+
+        message = await udp_node.wait_for(
+            lambda msg: msg.message_id == UDP_SERVER_HINT,
+            timeout=0.1,
+        )
+        if message is None:
+            continue
+
+        host = body_str(message.body, "host")
+        port = body_int(message.body, "port")
+        LOGGER.info(
+            "Received Lab 2 server hint from %s: %s:%s",
+            message.sender_pubkey_hex[:16],
+            host,
+            port,
+        )
+        _write_server_hint_cache_values(server_hint_cache, host, port)
+        new_hint = (host, port)
+        if new_hint != hinted_address:
+            hinted_since = loop.time()
+            hinted_address = new_hint
+        _walk_to_server_hint(overlay, new_hint)
+
+    if hinted_address is not None:
+        LOGGER.warning(
+            "Using hinted Lab 2 server endpoint without peer-discovery verification: %s:%s",
+            hinted_address[0],
+            hinted_address[1],
+        )
+        return _build_server_peer_from_hint(hinted_address)
+    return None
+
+
+async def _broadcast_server_hint_until_stopped(
+    udp_node: SignedUdpNode,
+    teammate_pubkeys: list[str],
+    server_peer,
+) -> None:
+    while True:
+        await _broadcast_server_hint(udp_node, teammate_pubkeys, server_peer)
+        await asyncio.sleep(1.0)
+
+
+async def _broadcast_server_hint(
+    udp_node: SignedUdpNode,
+    teammate_pubkeys: list[str],
+    server_peer,
+) -> None:
+    host, port = _peer_address_host_port(server_peer)
+    body = build_server_hint_body(host, port)
+    for _ in range(3):
+        udp_node.broadcast(teammate_pubkeys, UDP_SERVER_HINT, body)
+        await asyncio.sleep(0.05)
+
+
+def _peer_address_host_port(peer) -> tuple[str, int]:
+    address = peer.address
+    if hasattr(address, "ip") and hasattr(address, "port"):
+        return str(address.ip), int(address.port)
+    host, port = address
+    return str(host), int(port)
+
+
+def _walk_to_cached_server_hint(overlay, cache_path: Path) -> tuple[str, int] | None:
+    try:
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        host = raw["host"]
+        port = raw["port"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(host, str) or not isinstance(port, int):
+        return None
+    LOGGER.info("Walking to cached Lab 2 server hint: %s:%s", host, port)
+    address = (host, port)
+    _walk_to_server_hint(overlay, address)
+    return address
+
+
+def _walk_to_server_hint(overlay, address: tuple[str, int]) -> None:
+    overlay.walk_to(UDPv4Address(address[0], address[1]))
+
+
+def _build_server_peer_from_hint(address: tuple[str, int]) -> Peer:
+    return Peer(
+        bytes.fromhex(LAB2_SERVER_PUBLIC_KEY_HEX),
+        UDPv4Address(address[0], address[1]),
+    )
+
+
+def _write_server_hint_cache(cache_path: Path, server_peer) -> None:
+    host, port = _peer_address_host_port(server_peer)
+    _write_server_hint_cache_values(cache_path, host, port)
+
+
+def _write_server_hint_cache_values(cache_path: Path, host: str, port: int) -> None:
+    try:
+        cache_path.write_text(
+            json.dumps({"host": host, "port": port}, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        LOGGER.debug("Failed to write Lab 2 server hint cache: %s", exc)
 
 
 def _select_manual_team_endpoints(
@@ -291,10 +472,19 @@ class _RelayRaceSession:
             member.pubkey_hex
             for member in self.team.teammates(self.local_member.pubkey_hex)
         }
+        LOGGER.info(
+            "Sending GroupReady to teammate(s): %s",
+            self._format_member_set(missing),
+        )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.group_ready_timeout
         while missing and loop.time() < deadline:
             for pubkey_hex in list(missing):
+                LOGGER.debug(
+                    "Sending GroupReady to Node %s (...%s)",
+                    self.team.member_by_pubkey(pubkey_hex).role,
+                    pubkey_hex[-16:],
+                )
                 self.udp.send(
                     pubkey_hex, UDP_GROUP_READY, build_group_ready_body(group_id)
                 )
@@ -307,12 +497,21 @@ class _RelayRaceSession:
                 timeout=self.settings.request_retry_interval,
             )
             if message is not None:
+                LOGGER.info(
+                    "GroupReady ACK from Node %s",
+                    self.team.member_by_pubkey(message.sender_pubkey_hex).role,
+                )
                 missing.discard(message.sender_pubkey_hex)
         if missing:
-            raise TimeoutError("Timed out waiting for GroupReady ACKs")
+            raise TimeoutError(
+                "Timed out waiting for GroupReady ACKs from: "
+                + self._format_member_set(missing)
+            )
+        LOGGER.info("All GroupReady ACKs received")
 
     async def _wait_for_group_ready(self) -> str:
         node_a = self.team.members[0]
+        LOGGER.info("Waiting for GroupReady from Node A")
         message = await self.udp.wait_for(
             lambda msg: (
                 msg.message_id == UDP_GROUP_READY
@@ -328,7 +527,7 @@ class _RelayRaceSession:
             UDP_ACK,
             build_ack_body(UDP_GROUP_READY),
         )
-        LOGGER.info("Group ready: %s", group_id)
+        LOGGER.info("GroupReady received from Node A; ACK sent")
         return group_id
 
     async def _follow_round(self, round_number: int) -> None:
@@ -586,6 +785,7 @@ class _RelayRaceSession:
             UDP_ACK,
             build_ack_body(UDP_BATON_PASS, expected_round),
         )
+        LOGGER.info("BatonPass for round %d received; ACK sent", expected_round)
         return True
 
     def _handle_common_message(self, message) -> bool:
@@ -596,6 +796,7 @@ class _RelayRaceSession:
         ):
             self.group_id = body_str(message.body, "group_id")
             self.udp.send(node_a.pubkey_hex, UDP_ACK, build_ack_body(UDP_GROUP_READY))
+            LOGGER.debug("Duplicate GroupReady received; ACK resent")
             return True
 
         if self.local_round > 1 and message.message_id == UDP_BATON_PASS:
@@ -609,6 +810,14 @@ class _RelayRaceSession:
         if self.group_id is None:
             raise RuntimeError("Group is not ready")
         return self.group_id
+
+    def _format_member_set(self, pubkeys: set[str]) -> str:
+        if not pubkeys:
+            return "none"
+        return ", ".join(
+            f"Node {self.team.member_by_pubkey(pubkey).role} (...{pubkey[-16:]})"
+            for pubkey in sorted(pubkeys)
+        )
 
 
 def _looks_like_duplicate_success(result: RoundResult, round_number: int) -> bool:

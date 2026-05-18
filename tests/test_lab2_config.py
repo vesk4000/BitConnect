@@ -12,6 +12,7 @@ from lab2_relay_race.ids import (
     UDP_BATON_PASS,
     UDP_GROUP_READY,
     UDP_NONCE_BROADCAST,
+    UDP_SERVER_HINT,
     UDP_SIGNATURE_REPLY,
 )
 from lab2_relay_race.team import load_team_config
@@ -30,6 +31,7 @@ def test_lab2_message_ids_do_not_conflict():
         UDP_SIGNATURE_REPLY,
         UDP_BATON_PASS,
         UDP_ACK,
+        UDP_SERVER_HINT,
     } == CUSTOM_MESSAGE_IDS
 
 

@@ -145,6 +145,10 @@ def build_ack_body(
     return body
 
 
+def build_server_hint_body(host: str, port: int) -> dict[str, Any]:
+    return {"host": host, "port": port}
+
+
 def body_bytes(body: Mapping[str, Any], field: str) -> bytes:
     value = body.get(field)
     if not isinstance(value, str):
