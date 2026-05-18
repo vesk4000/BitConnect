@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 from lab1_pow_ipv8.libsodium_bootstrap import ensure_libsodium
 
@@ -55,6 +54,7 @@ class RaceSettings:
     key_file: str
     udp_port: int
     team_config: TeamConfig
+    manual_peers: dict[str, PeerEndpoint] | None = None
     discovery_timeout: float = 300.0
     server_peer_timeout: float = 30.0
     registration_timeout: float = 30.0
@@ -131,11 +131,17 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
             [bytes.fromhex(pubkey) for pubkey in teammate_pubkeys]
         )
 
-        peer_map = await _discover_team_endpoints(
-            overlay,
-            teammate_members,
-            settings.discovery_timeout,
-        )
+        if settings.manual_peers is None:
+            peer_map = await _discover_team_endpoints(
+                overlay,
+                teammate_members,
+                settings.discovery_timeout,
+            )
+        else:
+            peer_map = _select_manual_team_endpoints(
+                settings.manual_peers,
+                teammate_members,
+            )
         udp_node.set_peers(peer_map)
 
         server_peer = await overlay.wait_for_server_peer(settings.server_peer_timeout)
@@ -180,6 +186,34 @@ async def _discover_team_endpoints(
     return peers
 
 
+def _select_manual_team_endpoints(
+    manual_peers: dict[str, PeerEndpoint],
+    teammate_members: list[TeamMember],
+) -> dict[str, PeerEndpoint]:
+    missing = [
+        member.name
+        for member in teammate_members
+        if member.pubkey_hex not in manual_peers
+    ]
+    if missing:
+        raise ValueError(f"Missing manual teammate endpoint(s): {', '.join(missing)}")
+
+    peer_map = {
+        member.pubkey_hex: manual_peers[member.pubkey_hex]
+        for member in teammate_members
+    }
+    for member in teammate_members:
+        peer = peer_map[member.pubkey_hex]
+        LOGGER.info(
+            "Using manual endpoint for Node %s (%s): %s:%s",
+            member.role,
+            member.name,
+            peer.host,
+            peer.port,
+        )
+    return peer_map
+
+
 class _RelayRaceSession:
     def __init__(
         self,
@@ -201,6 +235,8 @@ class _RelayRaceSession:
         self.group_id: str | None = None
         self.signed_rounds: dict[int, tuple[bytes, bytes]] = {}
         self.local_round = {"A": 1, "B": 2, "C": 3}[self.local_member.role]
+        self.prefetched_challenges: dict[int, Challenge] = {}
+        self.result_tasks: dict[int, asyncio.Task[RoundResult | None]] = {}
 
     async def run(self) -> RaceOutcome:
         if self.local_member.role == "A":
@@ -210,13 +246,21 @@ class _RelayRaceSession:
             group_id = await self._wait_for_group_ready()
         self.group_id = group_id
 
-        for round_number in range(1, self.local_round):
-            await self._follow_round(round_number)
+        final_result: RoundResult | None = None
+        for round_number in range(1, 4):
+            leader = self.team.submitter_for_round(round_number)
+            if leader.pubkey_hex == self.local_member.pubkey_hex:
+                if round_number > 1:
+                    await self._wait_for_baton_or_fallback(round_number)
+                result = await self._lead_round(round_number)
+                if result is not None:
+                    final_result = result
+            else:
+                await self._follow_round(round_number)
 
-        if self.local_round > 1:
-            await self._wait_for_baton_or_fallback(self.local_round)
+        if final_result is None and self.local_round in self.result_tasks:
+            final_result = await self.result_tasks[self.local_round]
 
-        final_result = await self._lead_round(self.local_round)
         return RaceOutcome(
             group_id=group_id,
             local_role=self.local_member.role,
@@ -304,7 +348,6 @@ class _RelayRaceSession:
                 return
 
     async def _wait_for_baton_or_fallback(self, expected_round: int) -> None:
-        previous_leader = self.team.submitter_for_round(expected_round - 1)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.baton_timeout
         while loop.time() < deadline:
@@ -318,20 +361,13 @@ class _RelayRaceSession:
             if message.message_id == UDP_NONCE_BROADCAST:
                 self._reply_to_nonce_broadcast(message)
                 continue
-            if (
-                message.message_id == UDP_BATON_PASS
-                and message.sender_pubkey_hex == previous_leader.pubkey_hex
-                and body_int(message.body, "next_round_number") == expected_round
-            ):
-                self.udp.send(
-                    previous_leader.pubkey_hex,
-                    UDP_ACK,
-                    build_ack_body(UDP_BATON_PASS, expected_round),
-                )
+            if self._ack_expected_baton(message, expected_round):
                 return
 
         LOGGER.warning("Baton missing for round %d; polling server", expected_round)
-        await self._request_challenge_until(expected_round)
+        challenge = await self._fallback_until_baton_or_challenge(expected_round)
+        if challenge is not None:
+            self.prefetched_challenges[expected_round] = challenge
 
     async def _lead_round(self, round_number: int) -> RoundResult | None:
         challenge = await self._request_challenge_until(round_number)
@@ -376,26 +412,17 @@ class _RelayRaceSession:
                 self._reply_to_nonce_broadcast(message)
 
         ordered = build_ordered_signature_list(self.team, signatures)
-        self.overlay.send_signature_bundle(
-            self.server_peer,
-            self._group_id,
-            round_number,
-            ordered,
+        result_task = asyncio.create_task(
+            self._submit_bundle_until_result(round_number, ordered)
         )
+        self.result_tasks[round_number] = result_task
 
-        baton_task = None
         if round_number < 3:
             next_member = self.team.submitter_for_round(round_number + 1)
-            baton_task = asyncio.create_task(
-                self._send_baton(next_member.pubkey_hex, round_number + 1)
-            )
+            await self._send_baton(next_member.pubkey_hex, round_number + 1)
+            return None
 
-        result = await self.overlay.wait_for_round_result(2.0)
-        if result is not None:
-            LOGGER.info("Round result: %s", result.message)
-        if baton_task is not None:
-            await baton_task
-        return result
+        return await result_task
 
     async def _send_baton(self, target_pubkey_hex: str, next_round_number: int) -> None:
         loop = asyncio.get_running_loop()
@@ -417,6 +444,10 @@ class _RelayRaceSession:
         LOGGER.warning("No ACK for BatonPass to %s", target_pubkey_hex[:16])
 
     async def _request_challenge_until(self, expected_round: int) -> Challenge:
+        cached = self.prefetched_challenges.pop(expected_round, None)
+        if cached is not None:
+            return cached
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.round_timeout
         while loop.time() < deadline:
@@ -440,6 +471,89 @@ class _RelayRaceSession:
             )
         raise TimeoutError(f"Timed out waiting for round {expected_round} challenge")
 
+    async def _fallback_until_baton_or_challenge(
+        self, expected_round: int
+    ) -> Challenge | None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.round_timeout
+        while loop.time() < deadline:
+            self.overlay.send_challenge_request(self.server_peer, self._group_id)
+            retry_deadline = min(
+                deadline,
+                loop.time() + self.settings.request_retry_interval,
+            )
+            while loop.time() < retry_deadline:
+                challenge = await self.overlay.wait_for_challenge(0.05)
+                if challenge is not None:
+                    if challenge.round_number == expected_round:
+                        LOGGER.info(
+                            "Fallback received round %d challenge; deadline %.3f",
+                            challenge.round_number,
+                            challenge.deadline,
+                        )
+                        return challenge
+                    LOGGER.info(
+                        "Fallback saw round %d while waiting for round %d",
+                        challenge.round_number,
+                        expected_round,
+                    )
+
+                message = await self.udp.receive(timeout=0.01)
+                if message is None:
+                    continue
+                if self._ack_expected_baton(message, expected_round):
+                    return None
+                if message.message_id == UDP_NONCE_BROADCAST:
+                    self._reply_to_nonce_broadcast(message)
+                else:
+                    self._handle_common_message(message)
+        raise TimeoutError(f"Timed out waiting for round {expected_round} fallback")
+
+    async def _submit_bundle_until_result(
+        self,
+        round_number: int,
+        ordered_signatures: list[bytes],
+    ) -> RoundResult | None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.round_timeout
+        while loop.time() < deadline:
+            self.overlay.send_signature_bundle(
+                self.server_peer,
+                self._group_id,
+                round_number,
+                ordered_signatures,
+            )
+            result = await self.overlay.wait_for_round_result(
+                self.settings.request_retry_interval
+            )
+            if result is None:
+                continue
+            if result.round_number != round_number:
+                LOGGER.info(
+                    "Ignoring result for round %d while waiting for round %d: %s",
+                    result.round_number,
+                    round_number,
+                    result.message,
+                )
+                continue
+            if _looks_like_duplicate_success(result, round_number):
+                inferred = RoundResult(
+                    success=True,
+                    round_number=result.round_number,
+                    rounds_completed=result.rounds_completed,
+                    message=(
+                        result.message
+                        + " (previous bundle likely accepted; success response lost)"
+                    ),
+                )
+                LOGGER.info("Round result: %s", inferred.message)
+                return inferred
+            LOGGER.info("Round result: %s", result.message)
+            return result
+
+        LOGGER.warning("No round %d result before timeout", round_number)
+        return None
+
     def _reply_to_nonce_broadcast(self, message) -> None:
         round_number = body_int(message.body, "round_number")
         leader = self.team.submitter_for_round(round_number)
@@ -458,6 +572,22 @@ class _RelayRaceSession:
             build_signature_reply_body(round_number, signature),
         )
 
+    def _ack_expected_baton(self, message, expected_round: int) -> bool:
+        if message.message_id != UDP_BATON_PASS:
+            return False
+        previous_leader = self.team.submitter_for_round(expected_round - 1)
+        if (
+            message.sender_pubkey_hex != previous_leader.pubkey_hex
+            or body_int(message.body, "next_round_number") != expected_round
+        ):
+            return False
+        self.udp.send(
+            previous_leader.pubkey_hex,
+            UDP_ACK,
+            build_ack_body(UDP_BATON_PASS, expected_round),
+        )
+        return True
+
     def _handle_common_message(self, message) -> bool:
         node_a = self.team.members[0]
         if (
@@ -469,16 +599,7 @@ class _RelayRaceSession:
             return True
 
         if self.local_round > 1 and message.message_id == UDP_BATON_PASS:
-            previous_leader = self.team.submitter_for_round(self.local_round - 1)
-            if (
-                message.sender_pubkey_hex == previous_leader.pubkey_hex
-                and body_int(message.body, "next_round_number") == self.local_round
-            ):
-                self.udp.send(
-                    previous_leader.pubkey_hex,
-                    UDP_ACK,
-                    build_ack_body(UDP_BATON_PASS, self.local_round),
-                )
+            if self._ack_expected_baton(message, self.local_round):
                 return True
 
         return False
@@ -488,3 +609,11 @@ class _RelayRaceSession:
         if self.group_id is None:
             raise RuntimeError("Group is not ready")
         return self.group_id
+
+
+def _looks_like_duplicate_success(result: RoundResult, round_number: int) -> bool:
+    return (
+        not result.success
+        and result.rounds_completed >= round_number
+        and "no active challenge" in result.message.lower()
+    )
