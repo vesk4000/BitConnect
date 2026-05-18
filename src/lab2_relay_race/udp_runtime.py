@@ -47,6 +47,7 @@ class SignedUdpNode:
         self.transport: asyncio.DatagramTransport | None = None
         self._queue: asyncio.Queue[SignedUdpMessage] = asyncio.Queue()
         self._backlog: list[SignedUdpMessage] = []
+        self._ignored_message_ids: set[int] = set()
         self._sequence = 0
 
     async def start(self, port: int) -> None:
@@ -64,6 +65,9 @@ class SignedUdpNode:
 
     def set_peers(self, peers: Mapping[str, PeerEndpoint]) -> None:
         self.peers = dict(peers)
+
+    def ignore_message_id(self, message_id: int) -> None:
+        self._ignored_message_ids.add(message_id)
 
     def send(self, pubkey_hex: str, message_id: int, body: Mapping[str, Any]) -> None:
         if self.transport is None:
@@ -142,7 +146,31 @@ class SignedUdpNode:
             addr[0],
             addr[1],
         )
+        self._learn_peer_endpoint(message.sender_pubkey_hex, addr)
+        if message.message_id in self._ignored_message_ids:
+            LOGGER.debug(
+                "Ignoring signed UDP %s after endpoint learning",
+                _message_name(message.message_id),
+            )
+            return
         self._queue.put_nowait(message)
+
+    def _learn_peer_endpoint(self, pubkey_hex: str, addr: tuple[str, int]) -> None:
+        current = self.peers.get(pubkey_hex)
+        if current is None:
+            return
+        host, port = addr
+        if current.host == host and current.port == port:
+            return
+        LOGGER.info(
+            "Updated signed UDP endpoint for ...%s from %s:%d to %s:%d",
+            pubkey_hex[-16:],
+            current.host,
+            current.port,
+            host,
+            port,
+        )
+        self.peers[pubkey_hex] = PeerEndpoint(pubkey_hex, host, port)
 
 
 class _DatagramProtocol(asyncio.DatagramProtocol):

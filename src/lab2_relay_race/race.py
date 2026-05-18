@@ -175,6 +175,7 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
         )
         if server_peer is None:
             raise TimeoutError("Lab 2 server peer was not discovered")
+        udp_node.ignore_message_id(UDP_SERVER_HINT)
 
         runner = _RelayRaceSession(
             settings=settings,
