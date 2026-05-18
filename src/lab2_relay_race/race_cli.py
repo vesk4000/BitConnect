@@ -44,6 +44,21 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait for Lab 2 server discovery",
     )
     parser.add_argument(
+        "--ipv8-port",
+        type=int,
+        default=None,
+        help=(
+            "Optional local IPv8 port. Useful when running three nodes on one "
+            "machine."
+        ),
+    )
+    parser.add_argument(
+        "--bootstrap",
+        action="append",
+        default=[],
+        help=("Optional IPv8 bootstrap address in host:port form. Can be repeated."),
+    )
+    parser.add_argument(
         "--peer",
         action="append",
         default=[],
@@ -108,6 +123,22 @@ def parse_manual_peers(
     return peers
 
 
+def parse_bootstrap_addrs(items: list[str]) -> list[tuple[str, int]]:
+    addrs: list[tuple[str, int]] = []
+    for item in items:
+        if ":" not in item:
+            raise ValueError("--bootstrap must be in host:port form")
+        host, port_text = item.rsplit(":", 1)
+        try:
+            port = int(port_text)
+        except ValueError as exc:
+            raise ValueError(f"Invalid --bootstrap port in {item!r}") from exc
+        if not host or port <= 0 or port > 65535:
+            raise ValueError(f"Invalid --bootstrap address {item!r}")
+        addrs.append((host, port))
+    return addrs
+
+
 def main() -> int:
     args = parse_args()
     logging.basicConfig(
@@ -120,6 +151,7 @@ def main() -> int:
         team_config = load_team_config(args.team_config)
         local_pubkey = extract_public_key_hex(args.pem)
         manual_peers = parse_manual_peers(args.peer, team_config, local_pubkey)
+        bootstrap_addrs = parse_bootstrap_addrs(args.bootstrap)
         outcome = asyncio.run(
             run_relay_race(
                 RaceSettings(
@@ -127,6 +159,9 @@ def main() -> int:
                     udp_port=args.udp_port,
                     team_config=team_config,
                     manual_peers=manual_peers,
+                    bootstrap_addrs=bootstrap_addrs or None,
+                    ipv8_port=args.ipv8_port,
+                    debug_peers=args.debug,
                     discovery_timeout=args.discovery_timeout,
                     server_peer_timeout=args.server_timeout,
                 )

@@ -314,15 +314,41 @@ def build_lab2_community():
                     return peer
             return None
 
-        async def wait_for_server_peer(self, timeout: float) -> Peer | None:
+        async def wait_for_server_peer(
+            self, timeout: float, *, debug_peers: bool = False
+        ) -> Peer | None:
             loop = asyncio.get_running_loop()
             deadline = loop.time() + timeout
+            next_log = 0.0
             while loop.time() < deadline:
                 server_peer = self.find_server_peer()
                 if server_peer is not None:
+                    LOGGER.info("Discovered Lab 2 server peer")
                     return server_peer
+                if debug_peers and loop.time() >= next_log:
+                    self._log_known_peers()
+                    next_log = loop.time() + 2.0
                 await asyncio.sleep(0.1)
             return None
+
+        def _log_known_peers(self) -> None:
+            peers = self.get_peers()
+            if not peers:
+                LOGGER.info("Known Lab 2 IPv8 peers: none yet")
+                return
+            for peer in peers:
+                pubkey_hex = peer.public_key.key_to_bin().hex()
+                role = (
+                    "server"
+                    if peer.public_key.key_to_bin() == self.server_public_key
+                    else "peer"
+                )
+                LOGGER.info(
+                    "Known Lab 2 IPv8 %s: %s at %s",
+                    role,
+                    pubkey_hex,
+                    peer.address,
+                )
 
         def send_group_register(
             self, server_peer: Peer, member_pubkeys: list[bytes]
@@ -482,9 +508,7 @@ def build_lab2_community():
                     try:
                         self.ez_send(
                             new_peer,
-                            EndpointGossipPayload(
-                                other_pubkey, other_host, other_port
-                            ),
+                            EndpointGossipPayload(other_pubkey, other_host, other_port),
                         )
                         LOGGER.debug(
                             "Gossip: told ...%s about ...%s @ %s:%d",

@@ -55,6 +55,9 @@ class RaceSettings:
     udp_port: int
     team_config: TeamConfig
     manual_peers: dict[str, PeerEndpoint] | None = None
+    bootstrap_addrs: list[tuple[str, int]] | None = None
+    ipv8_port: int | None = None
+    debug_peers: bool = False
     discovery_timeout: float = 300.0
     server_peer_timeout: float = 30.0
     registration_timeout: float = 30.0
@@ -106,6 +109,8 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
 
     Lab2Community = build_lab2_community()
     builder = ConfigBuilder().clear_keys().clear_overlays()
+    if settings.ipv8_port is not None:
+        builder.set_port(settings.ipv8_port)
     builder.add_key("lab2", "curve25519", settings.key_file)
     builder.add_overlay(
         "Lab2Community",
@@ -130,6 +135,10 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
         overlay.set_target_pubkeys(
             [bytes.fromhex(pubkey) for pubkey in teammate_pubkeys]
         )
+        if settings.bootstrap_addrs:
+            for addr in settings.bootstrap_addrs:
+                LOGGER.info("Bootstrapping IPv8 discovery via %s:%s", addr[0], addr[1])
+                overlay.walk_to(addr)
 
         if settings.manual_peers is None:
             peer_map = await _discover_team_endpoints(
@@ -144,7 +153,10 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
             )
         udp_node.set_peers(peer_map)
 
-        server_peer = await overlay.wait_for_server_peer(settings.server_peer_timeout)
+        server_peer = await overlay.wait_for_server_peer(
+            settings.server_peer_timeout,
+            debug_peers=settings.debug_peers,
+        )
         if server_peer is None:
             raise TimeoutError("Lab 2 server peer was not discovered")
 
