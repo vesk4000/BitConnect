@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
+import socket
+import sys
 from collections.abc import Callable, Mapping
+from ctypes import wintypes
 from typing import Any
 
 from .ids import (
@@ -24,6 +28,7 @@ from .udp_protocol import (
 )
 
 LOGGER = logging.getLogger("lab2_udp_runtime")
+SIO_UDP_CONNRESET = 0x9800000C
 
 
 class SignedUdpNode:
@@ -52,10 +57,15 @@ class SignedUdpNode:
 
     async def start(self, port: int) -> None:
         loop = asyncio.get_running_loop()
-        self.transport, _ = await loop.create_datagram_endpoint(
-            lambda: _DatagramProtocol(self),
-            local_addr=("0.0.0.0", port),
-        )
+        sock = _create_udp_socket(port)
+        try:
+            self.transport, _ = await loop.create_datagram_endpoint(
+                lambda: _DatagramProtocol(self),
+                sock=sock,
+            )
+        except Exception:
+            sock.close()
+            raise
         LOGGER.info("Signed UDP listener started on port %s", port)
 
     async def stop(self) -> None:
@@ -195,3 +205,53 @@ def _message_name(message_id: int) -> str:
         UDP_SERVER_HINT: "ServerHint",
     }
     return names.get(message_id, str(message_id))
+
+
+def _create_udp_socket(port: int) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        if sys.platform == "win32":
+            _disable_windows_udp_connreset(sock)
+        sock.bind(("0.0.0.0", port))
+        sock.setblocking(False)
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+def _disable_windows_udp_connreset(sock: socket.socket) -> None:
+    # Windows reports ICMP port-unreachable responses as WSAECONNRESET on UDP
+    # sockets. During staggered startup we may send to a teammate before their
+    # listener exists, so disable that behavior to keep later receives working.
+    bytes_returned = wintypes.DWORD()
+    flag = wintypes.BOOL(False)
+    wsaioc = ctypes.windll.ws2_32.WSAIoctl
+    wsaioc.argtypes = [
+        ctypes.c_size_t,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    wsaioc.restype = ctypes.c_int
+    result = wsaioc(
+        sock.fileno(),
+        SIO_UDP_CONNRESET,
+        ctypes.byref(flag),
+        ctypes.sizeof(flag),
+        None,
+        0,
+        ctypes.byref(bytes_returned),
+        None,
+        None,
+    )
+    if result != 0:
+        LOGGER.debug(
+            "Failed to disable Windows UDP connection reset behavior: %s",
+            ctypes.windll.ws2_32.WSAGetLastError(),
+        )

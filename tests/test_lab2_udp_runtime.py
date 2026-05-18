@@ -9,7 +9,7 @@ from lab2_relay_race.ids import UDP_GROUP_READY
 from lab2_relay_race.udp_prep import PeerEndpoint
 from lab2_relay_race.udp_protocol import SignedUdpCodec, build_group_ready_body
 from lab2_relay_race.udp_protocol import SignedUdpMessage
-from lab2_relay_race.udp_runtime import SignedUdpNode
+from lab2_relay_race.udp_runtime import SignedUdpNode, _create_udp_socket
 
 
 def test_wait_for_reads_queue_when_backlog_has_non_matching_message():
@@ -30,6 +30,15 @@ def test_wait_for_reads_queue_when_backlog_has_non_matching_message():
         assert node._backlog == [non_matching]
 
     asyncio.run(scenario())
+
+
+def test_create_udp_socket_can_bind_ephemeral_port():
+    sock = _create_udp_socket(0)
+    try:
+        assert sock.getsockname()[1] > 0
+        assert not sock.getblocking()
+    finally:
+        sock.close()
 
 
 def test_valid_inbound_datagram_updates_peer_endpoint():
