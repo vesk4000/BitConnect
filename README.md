@@ -150,6 +150,8 @@ uv run lab2-prep \
 - `--udp-port <int>` - Local UDP port for signed relay traffic
 - `--discovery-timeout <seconds>` - Teammate discovery timeout
 - `--server-timeout <seconds>` - Lab 2 server discovery timeout
+- `--ipv8-port <int>` - Optional local IPv8 port for multi-node local runs
+- `--peer <ROLE=host:port>` - Optional manual teammate endpoint for race runs
 - `--debug` - Enable debug logging
 
 ### How it works
@@ -159,11 +161,12 @@ uv run lab2-prep \
 2. Loads teammate public keys and A/B/C roles from `lab2_team.json`
 3. Joins the Lab 2 IPv8 community and uses peer discovery to find teammates' UDP endpoints (only peers whose pubkey matches a teammate are accepted)
 4. Uses high-range custom IPv8 endpoint messages (`200`, `201`) to avoid server ID conflicts
-5. Uses signed UDP messages (`210`-`214`) for race coordination
+5. Uses signed UDP messages (`210`-`215`) for race coordination and server endpoint hints
 6. Builds bundle signatures in the exact registration order from `lab2_team.json`
 
 **Manual mode (optional `--peer`):**
-- Use `--peer host:port` to manually specify teammates' endpoints instead of auto-discovery
+- Prep uses `--peer host:port --peer-pubkey <hex>` to manually specify teammates' endpoints
+- Race uses `--peer ROLE=host:port` to manually specify teammates' endpoints instead of auto-discovery
 - Useful if IPv8 discovery isn't working or for known static IPs
 
 ---
@@ -172,8 +175,7 @@ uv run lab2-prep \
 
 - If no server response arrives, ensure your packet is sent with IPv8 authenticated messaging (`ez_send`, as implemented).
 - If you get invalid hash rejections, confirm you are hashing the exact same email/URL strings you submit.
-- If logs show `Known peers: none yet`, your network isn't discovering peers; try a different network or use `--bootstrap host:port`
-  from a TA/classmate to seed discovery.
+- If logs show `Known peers: none yet`, your network is not discovering peers; try a different network and use `--debug` to distinguish missing IPv8 peers from missing server peers.
 - On Windows, the client auto-downloads the official libsodium MSVC bundle into `vendor/libsodium/` if the DLL is missing,
   and prepends that folder to `PATH` for the current process. This does **not** modify your system PATH.
 - On macOS/Linux, the client first tries your system libsodium. If it's missing, you can either:

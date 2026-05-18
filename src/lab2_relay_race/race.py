@@ -24,6 +24,7 @@ from .ids import (
     UDP_BATON_PASS,
     UDP_GROUP_READY,
     UDP_NONCE_BROADCAST,
+    UDP_SERVER_HINT,
     UDP_SIGNATURE_REPLY,
 )
 from .keyutil import (
@@ -42,6 +43,7 @@ from .udp_protocol import (
     build_baton_pass_body,
     build_group_ready_body,
     build_nonce_broadcast_body,
+    build_server_hint_body,
     build_signature_reply_body,
 )
 from .udp_runtime import SignedUdpNode
@@ -55,7 +57,6 @@ class RaceSettings:
     udp_port: int
     team_config: TeamConfig
     manual_peers: dict[str, PeerEndpoint] | None = None
-    bootstrap_addrs: list[tuple[str, int]] | None = None
     ipv8_port: int | None = None
     debug_peers: bool = False
     discovery_timeout: float = 300.0
@@ -135,10 +136,6 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
         overlay.set_target_pubkeys(
             [bytes.fromhex(pubkey) for pubkey in teammate_pubkeys]
         )
-        if settings.bootstrap_addrs:
-            for addr in settings.bootstrap_addrs:
-                LOGGER.info("Bootstrapping IPv8 discovery via %s:%s", addr[0], addr[1])
-                overlay.walk_to(addr)
 
         if settings.manual_peers is None:
             peer_map = await _discover_team_endpoints(
@@ -153,8 +150,11 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
             )
         udp_node.set_peers(peer_map)
 
-        server_peer = await overlay.wait_for_server_peer(
-            settings.server_peer_timeout,
+        server_peer = await _wait_for_server_peer_with_team_hints(
+            overlay=overlay,
+            udp_node=udp_node,
+            teammate_pubkeys=teammate_pubkeys,
+            timeout=settings.server_peer_timeout,
             debug_peers=settings.debug_peers,
         )
         if server_peer is None:
@@ -196,6 +196,69 @@ async def _discover_team_endpoints(
             "Discovered Node %s (%s) at %s:%s", member.role, member.name, host, port
         )
     return peers
+
+
+async def _wait_for_server_peer_with_team_hints(
+    *,
+    overlay,
+    udp_node: SignedUdpNode,
+    teammate_pubkeys: list[str],
+    timeout: float,
+    debug_peers: bool,
+):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    next_log = 0.0
+
+    while loop.time() < deadline:
+        server_peer = overlay.find_server_peer()
+        if server_peer is not None:
+            LOGGER.info("Discovered Lab 2 server peer")
+            await _broadcast_server_hint(udp_node, teammate_pubkeys, server_peer)
+            return server_peer
+
+        if debug_peers and loop.time() >= next_log:
+            overlay._log_known_peers()
+            next_log = loop.time() + 2.0
+
+        message = await udp_node.wait_for(
+            lambda msg: msg.message_id == UDP_SERVER_HINT,
+            timeout=0.1,
+        )
+        if message is None:
+            continue
+
+        host = body_str(message.body, "host")
+        port = body_int(message.body, "port")
+        LOGGER.info(
+            "Received Lab 2 server hint from %s: %s:%s",
+            message.sender_pubkey_hex[:16],
+            host,
+            port,
+        )
+        overlay.walk_to((host, port))
+
+    return None
+
+
+async def _broadcast_server_hint(
+    udp_node: SignedUdpNode,
+    teammate_pubkeys: list[str],
+    server_peer,
+) -> None:
+    host, port = _peer_address_host_port(server_peer)
+    body = build_server_hint_body(host, port)
+    for _ in range(3):
+        udp_node.broadcast(teammate_pubkeys, UDP_SERVER_HINT, body)
+        await asyncio.sleep(0.05)
+
+
+def _peer_address_host_port(peer) -> tuple[str, int]:
+    address = peer.address
+    if hasattr(address, "ip") and hasattr(address, "port"):
+        return str(address.ip), int(address.port)
+    host, port = address
+    return str(host), int(port)
 
 
 def _select_manual_team_endpoints(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from lab2_relay_race.community import RoundResult
-from lab2_relay_race.race_cli import parse_bootstrap_addrs, parse_manual_peers
+from lab2_relay_race.race_cli import parse_manual_peers
 from lab2_relay_race.race import (
     _looks_like_duplicate_success,
     build_ordered_signature_list,
@@ -79,15 +79,3 @@ def test_parse_manual_peers_requires_all_teammates():
             team,
             team.members[2].pubkey_hex,
         )
-
-
-def test_parse_bootstrap_addrs():
-    assert parse_bootstrap_addrs(["127.0.0.1:8090", "example.test:1234"]) == [
-        ("127.0.0.1", 8090),
-        ("example.test", 1234),
-    ]
-
-
-def test_parse_bootstrap_addrs_rejects_invalid_values():
-    with pytest.raises(ValueError, match="host:port"):
-        parse_bootstrap_addrs(["127.0.0.1"])
