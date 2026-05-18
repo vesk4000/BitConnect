@@ -96,8 +96,9 @@ class SignedUdpNode:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return None
-            message = await self.receive(timeout=remaining)
-            if message is None:
+            try:
+                message = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
                 return None
             if predicate(message):
                 return message

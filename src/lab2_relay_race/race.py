@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 
 from lab1_pow_ipv8.libsodium_bootstrap import ensure_libsodium
 
@@ -49,6 +52,7 @@ from .udp_protocol import (
 from .udp_runtime import SignedUdpNode
 
 LOGGER = logging.getLogger("lab2_race")
+SERVER_HINT_CACHE = Path(".lab2_server_hint.json")
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,7 @@ class RaceSettings:
     manual_peers: dict[str, PeerEndpoint] | None = None
     ipv8_port: int | None = None
     debug_peers: bool = False
+    server_hint_cache: Path = SERVER_HINT_CACHE
     discovery_timeout: float = 300.0
     server_peer_timeout: float = 30.0
     registration_timeout: float = 30.0
@@ -149,6 +154,7 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
                 teammate_members,
             )
         udp_node.set_peers(peer_map)
+        _walk_to_cached_server_hint(overlay, settings.server_hint_cache)
 
         server_peer = await _wait_for_server_peer_with_team_hints(
             overlay=overlay,
@@ -156,6 +162,7 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
             teammate_pubkeys=teammate_pubkeys,
             timeout=settings.server_peer_timeout,
             debug_peers=settings.debug_peers,
+            server_hint_cache=settings.server_hint_cache,
         )
         if server_peer is None:
             raise TimeoutError("Lab 2 server peer was not discovered")
@@ -168,7 +175,19 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
             server_peer=server_peer,
             udp_node=udp_node,
         )
-        return await runner.run()
+        hint_task = asyncio.create_task(
+            _broadcast_server_hint_until_stopped(
+                udp_node,
+                teammate_pubkeys,
+                server_peer,
+            )
+        )
+        try:
+            return await runner.run()
+        finally:
+            hint_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await hint_task
     finally:
         await udp_node.stop()
         await ipv8.stop()
@@ -205,6 +224,7 @@ async def _wait_for_server_peer_with_team_hints(
     teammate_pubkeys: list[str],
     timeout: float,
     debug_peers: bool,
+    server_hint_cache: Path,
 ):
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
@@ -214,6 +234,7 @@ async def _wait_for_server_peer_with_team_hints(
         server_peer = overlay.find_server_peer()
         if server_peer is not None:
             LOGGER.info("Discovered Lab 2 server peer")
+            _write_server_hint_cache(server_hint_cache, server_peer)
             await _broadcast_server_hint(udp_node, teammate_pubkeys, server_peer)
             return server_peer
 
@@ -236,9 +257,20 @@ async def _wait_for_server_peer_with_team_hints(
             host,
             port,
         )
+        _write_server_hint_cache_values(server_hint_cache, host, port)
         overlay.walk_to((host, port))
 
     return None
+
+
+async def _broadcast_server_hint_until_stopped(
+    udp_node: SignedUdpNode,
+    teammate_pubkeys: list[str],
+    server_peer,
+) -> None:
+    while True:
+        await _broadcast_server_hint(udp_node, teammate_pubkeys, server_peer)
+        await asyncio.sleep(1.0)
 
 
 async def _broadcast_server_hint(
@@ -259,6 +291,34 @@ def _peer_address_host_port(peer) -> tuple[str, int]:
         return str(address.ip), int(address.port)
     host, port = address
     return str(host), int(port)
+
+
+def _walk_to_cached_server_hint(overlay, cache_path: Path) -> None:
+    try:
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        host = raw["host"]
+        port = raw["port"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return
+    if not isinstance(host, str) or not isinstance(port, int):
+        return
+    LOGGER.info("Walking to cached Lab 2 server hint: %s:%s", host, port)
+    overlay.walk_to((host, port))
+
+
+def _write_server_hint_cache(cache_path: Path, server_peer) -> None:
+    host, port = _peer_address_host_port(server_peer)
+    _write_server_hint_cache_values(cache_path, host, port)
+
+
+def _write_server_hint_cache_values(cache_path: Path, host: str, port: int) -> None:
+    try:
+        cache_path.write_text(
+            json.dumps({"host": host, "port": port}, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        LOGGER.debug("Failed to write Lab 2 server hint cache: %s", exc)
 
 
 def _select_manual_team_endpoints(

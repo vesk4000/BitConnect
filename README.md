@@ -176,6 +176,7 @@ uv run lab2-prep \
 - If no server response arrives, ensure your packet is sent with IPv8 authenticated messaging (`ez_send`, as implemented).
 - If you get invalid hash rejections, confirm you are hashing the exact same email/URL strings you submit.
 - If logs show `Known peers: none yet`, your network is not discovering peers; try a different network and use `--debug` to distinguish missing IPv8 peers from missing server peers.
+- When one teammate discovers the Lab 2 server, the client now shares that endpoint over signed UDP and caches it in `.lab2_server_hint.json` for later retries.
 - On Windows, the client auto-downloads the official libsodium MSVC bundle into `vendor/libsodium/` if the DLL is missing,
   and prepends that folder to `PATH` for the current process. This does **not** modify your system PATH.
 - On macOS/Linux, the client first tries your system libsodium. If it's missing, you can either:
