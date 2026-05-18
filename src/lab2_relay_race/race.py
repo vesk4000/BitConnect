@@ -19,8 +19,11 @@ from ipv8.configuration import (
     WalkerDefinition,
     default_bootstrap_defs,
 )
+from ipv8.messaging.interfaces.udp.endpoint import UDPv4Address
+from ipv8.peer import Peer
 from ipv8_service import IPv8
 
+from lab1_pow_ipv8.constants import LAB2_SERVER_PUBLIC_KEY_HEX
 from .community import Challenge, RoundResult, build_lab2_community
 from .ids import (
     UDP_ACK,
@@ -154,7 +157,9 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
                 teammate_members,
             )
         udp_node.set_peers(peer_map)
-        _walk_to_cached_server_hint(overlay, settings.server_hint_cache)
+        cached_server_hint = _walk_to_cached_server_hint(
+            overlay, settings.server_hint_cache
+        )
 
         server_peer = await _wait_for_server_peer_with_team_hints(
             overlay=overlay,
@@ -163,6 +168,7 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
             timeout=settings.server_peer_timeout,
             debug_peers=settings.debug_peers,
             server_hint_cache=settings.server_hint_cache,
+            initial_hint=cached_server_hint,
         )
         if server_peer is None:
             raise TimeoutError("Lab 2 server peer was not discovered")
@@ -225,10 +231,13 @@ async def _wait_for_server_peer_with_team_hints(
     timeout: float,
     debug_peers: bool,
     server_hint_cache: Path,
+    initial_hint: tuple[str, int] | None = None,
 ):
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     next_log = 0.0
+    hinted_address = initial_hint
+    hinted_since = loop.time() if hinted_address is not None else None
 
     while loop.time() < deadline:
         server_peer = overlay.find_server_peer()
@@ -241,6 +250,15 @@ async def _wait_for_server_peer_with_team_hints(
         if debug_peers and loop.time() >= next_log:
             overlay._log_known_peers()
             next_log = loop.time() + 2.0
+
+        if hinted_address is not None and hinted_since is not None:
+            if loop.time() - hinted_since >= 2.0:
+                LOGGER.warning(
+                    "Using hinted Lab 2 server endpoint after peer discovery did not verify it: %s:%s",
+                    hinted_address[0],
+                    hinted_address[1],
+                )
+                return _build_server_peer_from_hint(hinted_address)
 
         message = await udp_node.wait_for(
             lambda msg: msg.message_id == UDP_SERVER_HINT,
@@ -258,8 +276,19 @@ async def _wait_for_server_peer_with_team_hints(
             port,
         )
         _write_server_hint_cache_values(server_hint_cache, host, port)
-        overlay.walk_to((host, port))
+        new_hint = (host, port)
+        if new_hint != hinted_address:
+            hinted_since = loop.time()
+            hinted_address = new_hint
+        _walk_to_server_hint(overlay, new_hint)
 
+    if hinted_address is not None:
+        LOGGER.warning(
+            "Using hinted Lab 2 server endpoint without peer-discovery verification: %s:%s",
+            hinted_address[0],
+            hinted_address[1],
+        )
+        return _build_server_peer_from_hint(hinted_address)
     return None
 
 
@@ -293,17 +322,30 @@ def _peer_address_host_port(peer) -> tuple[str, int]:
     return str(host), int(port)
 
 
-def _walk_to_cached_server_hint(overlay, cache_path: Path) -> None:
+def _walk_to_cached_server_hint(overlay, cache_path: Path) -> tuple[str, int] | None:
     try:
         raw = json.loads(cache_path.read_text(encoding="utf-8"))
         host = raw["host"]
         port = raw["port"]
     except (OSError, KeyError, TypeError, json.JSONDecodeError):
-        return
+        return None
     if not isinstance(host, str) or not isinstance(port, int):
-        return
+        return None
     LOGGER.info("Walking to cached Lab 2 server hint: %s:%s", host, port)
-    overlay.walk_to((host, port))
+    address = (host, port)
+    _walk_to_server_hint(overlay, address)
+    return address
+
+
+def _walk_to_server_hint(overlay, address: tuple[str, int]) -> None:
+    overlay.walk_to(UDPv4Address(address[0], address[1]))
+
+
+def _build_server_peer_from_hint(address: tuple[str, int]) -> Peer:
+    return Peer(
+        bytes.fromhex(LAB2_SERVER_PUBLIC_KEY_HEX),
+        UDPv4Address(address[0], address[1]),
+    )
 
 
 def _write_server_hint_cache(cache_path: Path, server_peer) -> None:

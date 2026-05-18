@@ -5,6 +5,8 @@ import pytest
 from lab2_relay_race.community import RoundResult
 from lab2_relay_race.race_cli import parse_manual_peers
 from lab2_relay_race.race import (
+    _build_server_peer_from_hint,
+    _walk_to_cached_server_hint,
     _looks_like_duplicate_success,
     build_ordered_signature_list,
 )
@@ -79,3 +81,28 @@ def test_parse_manual_peers_requires_all_teammates():
             team,
             team.members[2].pubkey_hex,
         )
+
+
+def test_build_server_peer_from_hint_uses_official_server_key():
+    peer = _build_server_peer_from_hint(("127.0.0.1", 8091))
+
+    assert peer.address == ("127.0.0.1", 8091)
+    assert peer.public_key.key_to_bin().hex().startswith("4c69624e61434c504b3a82")
+
+
+def test_walk_to_cached_server_hint_returns_address(tmp_path):
+    class Overlay:
+        def __init__(self):
+            self.walked = []
+
+        def walk_to(self, address):
+            self.walked.append(address)
+
+    cache = tmp_path / "hint.json"
+    cache.write_text('{"host": "127.0.0.1", "port": 8091}', encoding="utf-8")
+    overlay = Overlay()
+
+    address = _walk_to_cached_server_hint(overlay, cache)
+
+    assert address == ("127.0.0.1", 8091)
+    assert overlay.walked[0] == ("127.0.0.1", 8091)
