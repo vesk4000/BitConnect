@@ -7,6 +7,14 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from .ids import (
+    UDP_ACK,
+    UDP_BATON_PASS,
+    UDP_GROUP_READY,
+    UDP_NONCE_BROADCAST,
+    UDP_SERVER_HINT,
+    UDP_SIGNATURE_REPLY,
+)
 from .udp_prep import PeerEndpoint
 from .udp_protocol import (
     DuplicateMessageError,
@@ -63,6 +71,14 @@ class SignedUdpNode:
         peer = self.peers[pubkey_hex]
         self._sequence += 1
         datagram = self.codec.encode(message_id, self._sequence, body)
+        LOGGER.debug(
+            "Signed UDP send %s seq=%d to ...%s @ %s:%d",
+            _message_name(message_id),
+            self._sequence,
+            pubkey_hex[-16:],
+            peer.host,
+            peer.port,
+        )
         self.transport.sendto(datagram, (peer.host, peer.port))
 
     def broadcast(
@@ -104,14 +120,28 @@ class SignedUdpNode:
                 return message
             self._backlog.append(message)
 
-    def _on_datagram(self, data: bytes) -> None:
+    def _on_datagram(self, data: bytes, addr: tuple[str, int]) -> None:
         try:
             message = self.codec.decode(data)
         except DuplicateMessageError:
+            LOGGER.debug("Dropping duplicate signed UDP datagram from %s:%d", *addr)
             return
         except UdpProtocolError as exc:
-            LOGGER.debug("Dropping invalid signed UDP datagram: %s", exc)
+            LOGGER.debug(
+                "Dropping invalid signed UDP datagram from %s:%d: %s",
+                addr[0],
+                addr[1],
+                exc,
+            )
             return
+        LOGGER.debug(
+            "Signed UDP recv %s seq=%d from ...%s @ %s:%d",
+            _message_name(message.message_id),
+            message.sequence,
+            message.sender_pubkey_hex[-16:],
+            addr[0],
+            addr[1],
+        )
         self._queue.put_nowait(message)
 
 
@@ -120,8 +150,20 @@ class _DatagramProtocol(asyncio.DatagramProtocol):
         self.node = node
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
-        self.node._on_datagram(data)
+        self.node._on_datagram(data, addr)
 
     def connection_lost(self, exc: Exception | None) -> None:
         if exc is not None:
             LOGGER.warning("Signed UDP connection lost: %s", exc)
+
+
+def _message_name(message_id: int) -> str:
+    names = {
+        UDP_GROUP_READY: "GroupReady",
+        UDP_NONCE_BROADCAST: "NonceBroadcast",
+        UDP_SIGNATURE_REPLY: "SignatureReply",
+        UDP_BATON_PASS: "BatonPass",
+        UDP_ACK: "Ack",
+        UDP_SERVER_HINT: "ServerHint",
+    }
+    return names.get(message_id, str(message_id))

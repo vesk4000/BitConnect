@@ -140,18 +140,21 @@ async def run_relay_race(settings: RaceSettings) -> RaceOutcome:
 
     try:
         overlay = next(o for o in ipv8.overlays if isinstance(o, Lab2Community))
-        overlay.set_local_endpoint(get_primary_outbound_ip(), settings.udp_port)
-        overlay.set_target_pubkeys(
-            [bytes.fromhex(pubkey) for pubkey in teammate_pubkeys]
-        )
-
         if settings.manual_peers is None:
+            overlay.set_local_endpoint(get_primary_outbound_ip(), settings.udp_port)
+            overlay.set_target_pubkeys(
+                [bytes.fromhex(pubkey) for pubkey in teammate_pubkeys]
+            )
             peer_map = await _discover_team_endpoints(
                 overlay,
                 teammate_members,
                 settings.discovery_timeout,
             )
         else:
+            LOGGER.info(
+                "Manual teammate endpoints configured; skipping IPv8 teammate "
+                "endpoint gossip"
+            )
             peer_map = _select_manual_team_endpoints(
                 settings.manual_peers,
                 teammate_members,
@@ -468,10 +471,19 @@ class _RelayRaceSession:
             member.pubkey_hex
             for member in self.team.teammates(self.local_member.pubkey_hex)
         }
+        LOGGER.info(
+            "Sending GroupReady to teammate(s): %s",
+            self._format_member_set(missing),
+        )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.settings.group_ready_timeout
         while missing and loop.time() < deadline:
             for pubkey_hex in list(missing):
+                LOGGER.debug(
+                    "Sending GroupReady to Node %s (...%s)",
+                    self.team.member_by_pubkey(pubkey_hex).role,
+                    pubkey_hex[-16:],
+                )
                 self.udp.send(
                     pubkey_hex, UDP_GROUP_READY, build_group_ready_body(group_id)
                 )
@@ -484,12 +496,21 @@ class _RelayRaceSession:
                 timeout=self.settings.request_retry_interval,
             )
             if message is not None:
+                LOGGER.info(
+                    "GroupReady ACK from Node %s",
+                    self.team.member_by_pubkey(message.sender_pubkey_hex).role,
+                )
                 missing.discard(message.sender_pubkey_hex)
         if missing:
-            raise TimeoutError("Timed out waiting for GroupReady ACKs")
+            raise TimeoutError(
+                "Timed out waiting for GroupReady ACKs from: "
+                + self._format_member_set(missing)
+            )
+        LOGGER.info("All GroupReady ACKs received")
 
     async def _wait_for_group_ready(self) -> str:
         node_a = self.team.members[0]
+        LOGGER.info("Waiting for GroupReady from Node A")
         message = await self.udp.wait_for(
             lambda msg: (
                 msg.message_id == UDP_GROUP_READY
@@ -505,7 +526,7 @@ class _RelayRaceSession:
             UDP_ACK,
             build_ack_body(UDP_GROUP_READY),
         )
-        LOGGER.info("Group ready: %s", group_id)
+        LOGGER.info("GroupReady received from Node A; ACK sent")
         return group_id
 
     async def _follow_round(self, round_number: int) -> None:
@@ -763,6 +784,7 @@ class _RelayRaceSession:
             UDP_ACK,
             build_ack_body(UDP_BATON_PASS, expected_round),
         )
+        LOGGER.info("BatonPass for round %d received; ACK sent", expected_round)
         return True
 
     def _handle_common_message(self, message) -> bool:
@@ -773,6 +795,7 @@ class _RelayRaceSession:
         ):
             self.group_id = body_str(message.body, "group_id")
             self.udp.send(node_a.pubkey_hex, UDP_ACK, build_ack_body(UDP_GROUP_READY))
+            LOGGER.debug("Duplicate GroupReady received; ACK resent")
             return True
 
         if self.local_round > 1 and message.message_id == UDP_BATON_PASS:
@@ -786,6 +809,14 @@ class _RelayRaceSession:
         if self.group_id is None:
             raise RuntimeError("Group is not ready")
         return self.group_id
+
+    def _format_member_set(self, pubkeys: set[str]) -> str:
+        if not pubkeys:
+            return "none"
+        return ", ".join(
+            f"Node {self.team.member_by_pubkey(pubkey).role} (...{pubkey[-16:]})"
+            for pubkey in sorted(pubkeys)
+        )
 
 
 def _looks_like_duplicate_success(result: RoundResult, round_number: int) -> bool:

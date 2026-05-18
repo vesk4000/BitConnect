@@ -44,6 +44,12 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait for Lab 2 server discovery",
     )
     parser.add_argument(
+        "--group-ready-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds to wait for the pre-race GroupReady handshake",
+    )
+    parser.add_argument(
         "--ipv8-port",
         type=int,
         default=None,
@@ -140,6 +146,7 @@ def main() -> int:
                     debug_peers=args.debug,
                     discovery_timeout=args.discovery_timeout,
                     server_peer_timeout=args.server_timeout,
+                    group_ready_timeout=args.group_ready_timeout,
                 )
             )
         )
