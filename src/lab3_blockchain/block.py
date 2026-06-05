@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 
 from .validation import (
+    UINT32_MAX,
+    UINT64_MAX,
     validate_bytes,
     validate_uint32,
     validate_uint64,
@@ -90,6 +92,65 @@ def block_hash(block: Block) -> bytes:
     """Compute SHA256 over the block's 84-byte header."""
 
     return sha256(block_header(block)).digest()
+
+
+def leading_zero_bits(digest: bytes) -> int:
+    """Count leading zero bits in a byte string."""
+
+    validate_bytes("digest", digest)
+    bits = 0
+    for byte in digest:
+        if byte == 0:
+            bits += 8
+            continue
+        return bits + (8 - byte.bit_length())
+    return bits
+
+
+def has_valid_pow(block: Block) -> bool:
+    """Return True when the block hash satisfies its declared difficulty."""
+
+    return leading_zero_bits(block_hash(block)) >= block.difficulty
+
+
+def mine_block_candidate(
+    *,
+    height: int,
+    prev_hash: bytes,
+    tx_hashes: tuple[bytes, ...],
+    timestamp: int,
+    difficulty: int,
+    start_nonce: int = 0,
+    max_nonce: int = UINT64_MAX,
+) -> Block:
+    """Search nonce range for a block satisfying the declared difficulty."""
+
+    validate_height(height)
+    validate_hash_bytes("prev_hash", prev_hash)
+    validate_tx_hashes(tx_hashes)
+    validate_uint64("timestamp", timestamp)
+    validate_uint32("difficulty", difficulty)
+    validate_uint64("start_nonce", start_nonce)
+    validate_uint64("max_nonce", max_nonce)
+    if start_nonce > max_nonce:
+        raise ValueError("start_nonce must be <= max_nonce")
+
+    body_hash = txs_hash(tx_hashes)
+    for nonce in range(start_nonce, max_nonce + 1):
+        digest = sha256(
+            pack_header(prev_hash, body_hash, timestamp, difficulty, nonce)
+        ).digest()
+        if leading_zero_bits(digest) >= difficulty:
+            return Block(
+                height=height,
+                prev_hash=prev_hash,
+                tx_hashes=tx_hashes,
+                timestamp=timestamp,
+                difficulty=difficulty,
+                nonce=nonce,
+            )
+
+    raise RuntimeError("No valid nonce found in provided search range")
 
 
 def validate_height(height: int) -> None:

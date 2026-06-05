@@ -12,6 +12,9 @@ from lab3_blockchain.block import (
     Block,
     block_hash,
     block_header,
+    has_valid_pow,
+    leading_zero_bits,
+    mine_block_candidate,
     pack_header,
     txs_hash,
 )
@@ -91,6 +94,109 @@ def test_block_hash_is_sha256_of_packed_header():
     )
 
     assert block_hash(block_obj) == sha256(block_header(block_obj)).digest()
+
+
+def test_leading_zero_bits_counts_correctly():
+    assert leading_zero_bits(bytes.fromhex("0000000f")) == 28
+    assert leading_zero_bits(bytes.fromhex("00000010")) == 27
+    assert leading_zero_bits(bytes.fromhex("00ff")) == 8
+    assert leading_zero_bits(b"") == 0
+
+
+def test_difficulty_zero_always_satisfies_pow():
+    block_obj = Block(
+        height=1,
+        prev_hash=b"p" * HASH_SIZE,
+        tx_hashes=(),
+        timestamp=42,
+        difficulty=0,
+        nonce=0,
+    )
+
+    assert has_valid_pow(block_obj)
+
+
+def test_has_valid_pow_recomputes_block_hash_against_declared_difficulty():
+    mined = mine_block_candidate(
+        height=1,
+        prev_hash=b"p" * HASH_SIZE,
+        tx_hashes=(),
+        timestamp=42,
+        difficulty=8,
+        max_nonce=10_000,
+    )
+    mined_bits = leading_zero_bits(block_hash(mined))
+    too_difficult = Block(
+        height=mined.height,
+        prev_hash=mined.prev_hash,
+        tx_hashes=mined.tx_hashes,
+        timestamp=mined.timestamp,
+        difficulty=mined_bits + 1,
+        nonce=mined.nonce,
+    )
+
+    assert mined_bits >= 8
+    assert has_valid_pow(mined)
+    assert not has_valid_pow(too_difficult)
+
+
+def test_bad_nonce_fails_when_hash_is_recomputed():
+    for nonce in range(100):
+        block_obj = Block(
+            height=1,
+            prev_hash=b"p" * HASH_SIZE,
+            tx_hashes=(),
+            timestamp=42,
+            difficulty=8,
+            nonce=nonce,
+        )
+        if not has_valid_pow(block_obj):
+            return
+
+    pytest.fail("expected at least one invalid nonce in first 100 candidates")
+
+
+def test_mine_block_candidate_returns_valid_block():
+    mined = mine_block_candidate(
+        height=1,
+        prev_hash=b"p" * HASH_SIZE,
+        tx_hashes=(b"a" * HASH_SIZE,),
+        timestamp=42,
+        difficulty=4,
+        max_nonce=1_000,
+    )
+
+    assert mined.height == 1
+    assert mined.prev_hash == b"p" * HASH_SIZE
+    assert mined.tx_hashes == (b"a" * HASH_SIZE,)
+    assert mined.timestamp == 42
+    assert mined.difficulty == 4
+    assert has_valid_pow(mined)
+
+
+def test_mine_block_candidate_rejects_exhausted_nonce_range():
+    with pytest.raises(RuntimeError):
+        mine_block_candidate(
+            height=1,
+            prev_hash=b"p" * HASH_SIZE,
+            tx_hashes=(),
+            timestamp=42,
+            difficulty=256,
+            max_nonce=3,
+        )
+
+
+def test_mine_block_candidate_rejects_reversed_nonce_range():
+    with pytest.raises(ValueError, match="start_nonce"):
+        mine_block_candidate(
+            height=1,
+            prev_hash=b"p" * HASH_SIZE,
+            tx_hashes=(),
+            timestamp=42,
+            difficulty=0,
+            start_nonce=2,
+            max_nonce=1,
+        )
 
 
 @pytest.mark.parametrize(
