@@ -64,6 +64,7 @@ def test_new_chain_state_contains_only_genesis():
     assert state.hash_by_height == {0: GENESIS_HASH}
     assert state.children_by_hash == {GENESIS_HASH: set()}
     assert state.orphans_by_prev_hash == {}
+    assert state.transactions_by_hash == {}
     assert state.mempool == {}
 
 
@@ -74,6 +75,7 @@ def test_add_transaction_verifies_signature_and_returns_hash():
     tx_hash = state.add_transaction(tx)
 
     assert tx_hash == transaction_hash(tx)
+    assert state.transactions_by_hash == {tx_hash: tx}
     assert state.mempool == {tx_hash: tx}
     assert state.snapshot_mempool() == (tx_hash,)
 
@@ -257,6 +259,108 @@ def test_orphan_with_wrong_height_is_dropped_when_parent_arrives():
     assert state.height() == 1
 
 
+def test_equal_height_fork_uses_lower_hash_as_tip_regardless_of_arrival_order():
+    block_a, block_b = _competing_height_one_blocks()
+    lower_hash_block, higher_hash_block = sorted(
+        (block_a, block_b),
+        key=block_hash,
+    )
+    state = BlockchainState()
+
+    first_result = state.add_block(higher_hash_block)
+    second_result = state.add_block(lower_hash_block)
+
+    assert first_result.accepted
+    assert first_result.new_tip
+    assert second_result.accepted
+    assert second_result.new_tip
+    assert state.tip() == lower_hash_block
+    assert state.get_block_by_height(1) == lower_hash_block
+    assert state.get_block_by_hash(block_hash(higher_hash_block)) == higher_hash_block
+    assert state.children_by_hash[GENESIS_HASH] == {
+        block_hash(lower_hash_block),
+        block_hash(higher_hash_block),
+    }
+
+
+def test_equal_height_fork_with_higher_hash_is_stored_without_tip_switch():
+    block_a, block_b = _competing_height_one_blocks()
+    lower_hash_block, higher_hash_block = sorted(
+        (block_a, block_b),
+        key=block_hash,
+    )
+    state = BlockchainState()
+
+    state.add_block(lower_hash_block)
+    result = state.add_block(higher_hash_block)
+
+    assert result.accepted
+    assert not result.new_tip
+    assert state.tip() == lower_hash_block
+    assert state.get_block_by_height(1) == lower_hash_block
+    assert state.get_block_by_hash(block_hash(higher_hash_block)) == higher_hash_block
+
+
+def test_longer_side_branch_overtakes_current_tip():
+    block_a, block_b = _competing_height_one_blocks()
+    lower_hash_block, higher_hash_block = sorted(
+        (block_a, block_b),
+        key=block_hash,
+    )
+    state = BlockchainState()
+    state.add_block(lower_hash_block)
+    state.add_block(higher_hash_block)
+    side_child = _child_block(
+        prev_hash=block_hash(higher_hash_block),
+        height=2,
+        tx_hashes=(b"c" * 32,),
+    )
+
+    result = state.add_block(side_child)
+
+    assert result.accepted
+    assert result.new_tip
+    assert state.tip() == side_child
+    assert state.height() == 2
+    assert state.get_block_by_height(1) == higher_hash_block
+    assert state.get_block_by_height(2) == side_child
+
+
+def test_fork_switch_reconciles_known_transactions_in_mempool():
+    state = BlockchainState()
+    tx_old_main = _signed_transaction(b"old-main", 42)
+    tx_new_main = _signed_transaction(b"new-main", 43)
+    old_main_tx_hash = state.add_transaction(tx_old_main)
+    new_main_tx_hash = state.add_transaction(tx_new_main)
+    old_main = _child_block(
+        prev_hash=GENESIS_HASH,
+        height=1,
+        tx_hashes=(old_main_tx_hash,),
+    )
+    side_parent = _child_block(
+        prev_hash=GENESIS_HASH,
+        height=1,
+        tx_hashes=(new_main_tx_hash,),
+    )
+    if block_hash(side_parent) < block_hash(old_main):
+        old_main, side_parent = side_parent, old_main
+        old_main_tx_hash, new_main_tx_hash = new_main_tx_hash, old_main_tx_hash
+        tx_old_main, tx_new_main = tx_new_main, tx_old_main
+    side_child = _child_block(
+        prev_hash=block_hash(side_parent),
+        height=2,
+        tx_hashes=(),
+    )
+
+    state.add_block(old_main)
+    state.add_block(side_parent)
+    state.add_block(side_child)
+
+    assert state.tip() == side_child
+    assert state.mempool == {old_main_tx_hash: tx_old_main}
+    assert new_main_tx_hash not in state.mempool
+
+
 def test_add_block_rejects_wrong_height():
     state = BlockchainState()
     block = _child_block(prev_hash=GENESIS_HASH, height=2)
@@ -333,4 +437,19 @@ def _child_block(
         timestamp=42 + height,
         difficulty=0,
         max_nonce=0,
+    )
+
+
+def _competing_height_one_blocks() -> tuple[Block, Block]:
+    return (
+        _child_block(
+            prev_hash=GENESIS_HASH,
+            height=1,
+            tx_hashes=(b"a" * 32,),
+        ),
+        _child_block(
+            prev_hash=GENESIS_HASH,
+            height=1,
+            tx_hashes=(b"b" * 32,),
+        ),
     )

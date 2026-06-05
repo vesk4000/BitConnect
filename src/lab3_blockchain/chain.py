@@ -57,6 +57,7 @@ class BlockchainState:
         self.hash_by_height: dict[int, bytes] = {genesis_block.height: genesis_hash}
         self.children_by_hash: dict[bytes, set[bytes]] = {genesis_hash: set()}
         self.orphans_by_prev_hash: dict[bytes, list[Block]] = {}
+        self.transactions_by_hash: dict[bytes, Transaction] = {}
         self.mempool: dict[bytes, Transaction] = {}
         self._tip_hash = genesis_hash
         self._orphan_hashes: set[bytes] = set()
@@ -84,6 +85,7 @@ class BlockchainState:
         if not verify_transaction_signature(transaction):
             raise ValueError("transaction signature is invalid")
         tx_hash = transaction_hash(transaction)
+        self.transactions_by_hash.setdefault(tx_hash, transaction)
         self.mempool.setdefault(tx_hash, transaction)
         return tx_hash
 
@@ -160,11 +162,12 @@ class BlockchainState:
         )
         self.children_by_hash.setdefault(validation.block_hash, set())
 
-        new_tip = block.height > self.height()
+        old_main_chain = self._main_chain_block_hashes()
+        new_tip = self._is_better_tip(validation.block_hash, block)
         if new_tip:
             self._tip_hash = validation.block_hash
             self._rebuild_main_chain_index()
-            self._remove_mempool_transactions(block.tx_hashes)
+            self._reconcile_mempool_after_tip_change(old_main_chain)
 
         self._attach_orphans(validation.block_hash)
         return AddBlockResult(
@@ -190,6 +193,12 @@ class BlockchainState:
             self._orphan_hashes.discard(orphan_hash)
             self.add_block(orphan)
 
+    def _is_better_tip(self, candidate_hash: bytes, candidate_block: Block) -> bool:
+        current_tip = self.tip()
+        if candidate_block.height != current_tip.height:
+            return candidate_block.height > current_tip.height
+        return candidate_hash < self._tip_hash
+
     def _rebuild_main_chain_index(self) -> None:
         main_chain: dict[int, bytes] = {}
         cursor_hash = self._tip_hash
@@ -201,6 +210,37 @@ class BlockchainState:
             cursor_hash = cursor_block.prev_hash
         self.hash_by_height = main_chain
 
-    def _remove_mempool_transactions(self, tx_hashes: tuple[bytes, ...]) -> None:
-        for tx_hash in tx_hashes:
+    def _main_chain_block_hashes(self) -> tuple[bytes, ...]:
+        return tuple(
+            self.hash_by_height[height] for height in sorted(self.hash_by_height)
+        )
+
+    def _reconcile_mempool_after_tip_change(
+        self,
+        old_main_chain: tuple[bytes, ...],
+    ) -> None:
+        old_tx_hashes = self._chain_tx_hashes(old_main_chain)
+        new_tx_hashes = self._chain_tx_hashes(self._main_chain_block_hashes())
+        new_tx_hash_set = set(new_tx_hashes)
+
+        for tx_hash in old_tx_hashes:
+            if tx_hash in new_tx_hash_set:
+                continue
+            transaction = self.transactions_by_hash.get(tx_hash)
+            if transaction is not None:
+                self.mempool.setdefault(tx_hash, transaction)
+
+        for tx_hash in new_tx_hashes:
             self.mempool.pop(tx_hash, None)
+
+    def _chain_tx_hashes(self, block_hashes: tuple[bytes, ...]) -> tuple[bytes, ...]:
+        result: list[bytes] = []
+        seen: set[bytes] = set()
+        for chain_block_hash in block_hashes:
+            chain_block = self.blocks_by_hash[chain_block_hash]
+            for tx_hash in chain_block.tx_hashes:
+                if tx_hash in seen:
+                    continue
+                seen.add(tx_hash)
+                result.append(tx_hash)
+        return tuple(result)
