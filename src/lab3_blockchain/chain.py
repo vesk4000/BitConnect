@@ -56,8 +56,10 @@ class BlockchainState:
         self.blocks_by_hash: dict[bytes, Block] = {genesis_hash: genesis_block}
         self.hash_by_height: dict[int, bytes] = {genesis_block.height: genesis_hash}
         self.children_by_hash: dict[bytes, set[bytes]] = {genesis_hash: set()}
+        self.orphans_by_prev_hash: dict[bytes, list[Block]] = {}
         self.mempool: dict[bytes, Transaction] = {}
         self._tip_hash = genesis_hash
+        self._orphan_hashes: set[bytes] = set()
 
     @property
     def tip_hash(self) -> bytes:
@@ -95,7 +97,10 @@ class BlockchainState:
         validate_tx_hashes(block.tx_hashes)
         candidate_hash = block_hash(block)
 
-        if candidate_hash in self.blocks_by_hash:
+        if (
+            candidate_hash in self.blocks_by_hash
+            or candidate_hash in self._orphan_hashes
+        ):
             return BlockValidationResult(
                 valid=False,
                 block_hash=candidate_hash,
@@ -139,6 +144,8 @@ class BlockchainState:
     def add_block(self, block: Block) -> AddBlockResult:
         validation = self.validate_block(block)
         if not validation.valid:
+            if validation.reason == BLOCK_UNKNOWN_PARENT:
+                self._store_orphan(block, validation.block_hash)
             return AddBlockResult(
                 accepted=False,
                 block_hash=validation.block_hash,
@@ -159,6 +166,7 @@ class BlockchainState:
             self._rebuild_main_chain_index()
             self._remove_mempool_transactions(block.tx_hashes)
 
+        self._attach_orphans(validation.block_hash)
         return AddBlockResult(
             accepted=True,
             block_hash=validation.block_hash,
@@ -166,6 +174,21 @@ class BlockchainState:
             message="block accepted",
             new_tip=new_tip,
         )
+
+    def _store_orphan(
+        self,
+        block: Block,
+        block_hash_value: bytes,
+    ) -> None:
+        self.orphans_by_prev_hash.setdefault(block.prev_hash, []).append(block)
+        self._orphan_hashes.add(block_hash_value)
+
+    def _attach_orphans(self, parent_hash: bytes) -> None:
+        orphans = self.orphans_by_prev_hash.pop(parent_hash, [])
+        for orphan in orphans:
+            orphan_hash = block_hash(orphan)
+            self._orphan_hashes.discard(orphan_hash)
+            self.add_block(orphan)
 
     def _rebuild_main_chain_index(self) -> None:
         main_chain: dict[int, bytes] = {}

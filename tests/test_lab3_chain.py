@@ -63,6 +63,7 @@ def test_new_chain_state_contains_only_genesis():
     assert state.blocks_by_hash == {GENESIS_HASH: GENESIS_BLOCK}
     assert state.hash_by_height == {0: GENESIS_HASH}
     assert state.children_by_hash == {GENESIS_HASH: set()}
+    assert state.orphans_by_prev_hash == {}
     assert state.mempool == {}
 
 
@@ -186,7 +187,74 @@ def test_add_block_rejects_unknown_parent():
 
     assert not result.accepted
     assert result.reason == BLOCK_UNKNOWN_PARENT
+    assert result.block_hash == block_hash(block)
     assert state.height() == 0
+    assert state.get_block_by_hash(block_hash(block)) is None
+    assert state.orphans_by_prev_hash == {b"x" * 32: [block]}
+
+
+def test_add_block_rejects_duplicate_orphan():
+    state = BlockchainState()
+    block = _child_block(prev_hash=b"x" * 32, height=1)
+    state.add_block(block)
+
+    result = state.add_block(block)
+
+    assert not result.accepted
+    assert result.reason == BLOCK_DUPLICATE
+    assert state.orphans_by_prev_hash == {b"x" * 32: [block]}
+
+
+def test_orphan_attaches_when_parent_arrives():
+    state = BlockchainState()
+    parent = _child_block(prev_hash=GENESIS_HASH, height=1)
+    child = _child_block(prev_hash=block_hash(parent), height=2)
+
+    orphan_result = state.add_block(child)
+    parent_result = state.add_block(parent)
+
+    assert not orphan_result.accepted
+    assert orphan_result.reason == BLOCK_UNKNOWN_PARENT
+    assert parent_result.accepted
+    assert state.orphans_by_prev_hash == {}
+    assert state.get_block_by_hash(block_hash(parent)) == parent
+    assert state.get_block_by_hash(block_hash(child)) == child
+    assert state.height() == 2
+    assert state.tip() == child
+    assert state.get_block_by_height(1) == parent
+    assert state.get_block_by_height(2) == child
+    assert state.children_by_hash[block_hash(parent)] == {block_hash(child)}
+
+
+def test_orphan_chain_attaches_multiple_descendants():
+    state = BlockchainState()
+    block1 = _child_block(prev_hash=GENESIS_HASH, height=1)
+    block2 = _child_block(prev_hash=block_hash(block1), height=2)
+    block3 = _child_block(prev_hash=block_hash(block2), height=3)
+
+    state.add_block(block3)
+    state.add_block(block2)
+    state.add_block(block1)
+
+    assert state.orphans_by_prev_hash == {}
+    assert state.height() == 3
+    assert state.tip() == block3
+    assert state.get_block_by_height(1) == block1
+    assert state.get_block_by_height(2) == block2
+    assert state.get_block_by_height(3) == block3
+
+
+def test_orphan_with_wrong_height_is_dropped_when_parent_arrives():
+    state = BlockchainState()
+    parent = _child_block(prev_hash=GENESIS_HASH, height=1)
+    child = _child_block(prev_hash=block_hash(parent), height=3)
+
+    state.add_block(child)
+    state.add_block(parent)
+
+    assert state.orphans_by_prev_hash == {}
+    assert state.get_block_by_hash(block_hash(child)) is None
+    assert state.height() == 1
 
 
 def test_add_block_rejects_wrong_height():
