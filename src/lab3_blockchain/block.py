@@ -10,6 +10,7 @@ from .validation import (
     UINT32_MAX,
     UINT64_MAX,
     validate_bytes,
+    validate_non_negative_int,
     validate_uint32,
     validate_uint64,
 )
@@ -154,10 +155,7 @@ def mine_block_candidate(
 
 
 def validate_height(height: int) -> None:
-    if not isinstance(height, int) or isinstance(height, bool):
-        raise TypeError("height must be an integer")
-    if height < 0:
-        raise ValueError("height must be non-negative")
+    validate_non_negative_int("height", height)
 
 
 def validate_tx_hashes(tx_hashes: tuple[bytes, ...]) -> None:

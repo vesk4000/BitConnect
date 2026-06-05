@@ -19,6 +19,13 @@ def validate_uint64(field_name: str, value: int) -> None:
     validate_unsigned_int(field_name, value, UINT64_MAX, 64)
 
 
+def validate_non_negative_int(field_name: str, value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError(f"{field_name} must be an integer")
+    if value < 0:
+        raise ValueError(f"{field_name} must be non-negative")
+
+
 def validate_unsigned_int(
     field_name: str,
     value: int,
