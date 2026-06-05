@@ -2,9 +2,14 @@ import pytest
 from ipv8.keyvault.crypto import default_eccrypto
 
 from lab1_pow_ipv8.libsodium_bootstrap import ensure_libsodium
-from lab3_blockchain.block import block_hash, txs_hash
+from lab3_blockchain.block import Block, block_hash, mine_block_candidate, txs_hash
 from lab3_blockchain import chain
 from lab3_blockchain.chain import (
+    BLOCK_BAD_HEIGHT,
+    BLOCK_BAD_POW,
+    BLOCK_DUPLICATE,
+    BLOCK_UNKNOWN_PARENT,
+    BLOCK_VALID,
     GENESIS_BLOCK,
     GENESIS_HASH,
     ZERO_HASH,
@@ -119,6 +124,112 @@ def test_snapshot_mempool_rejects_invalid_limit(limit):
         state.snapshot_mempool(limit=limit)
 
 
+def test_validate_block_accepts_valid_child_of_genesis():
+    state = BlockchainState()
+    block = _child_block(prev_hash=GENESIS_HASH, height=1)
+
+    result = state.validate_block(block)
+
+    assert result.valid
+    assert result.reason == BLOCK_VALID
+    assert result.block_hash == block_hash(block)
+
+
+def test_add_block_appends_valid_child_of_genesis():
+    state = BlockchainState()
+    block = _child_block(prev_hash=GENESIS_HASH, height=1)
+
+    result = state.add_block(block)
+
+    assert result.accepted
+    assert result.reason == BLOCK_VALID
+    assert result.new_tip
+    assert result.block_hash == block_hash(block)
+    assert state.tip_hash == block_hash(block)
+    assert state.height() == 1
+    assert state.tip() == block
+    assert state.get_block_by_height(1) == block
+    assert state.get_block_by_hash(block_hash(block)) == block
+    assert state.children_by_hash[GENESIS_HASH] == {block_hash(block)}
+    assert state.children_by_hash[block_hash(block)] == set()
+
+
+def test_add_block_removes_included_transactions_from_mempool():
+    state = BlockchainState()
+    tx = _signed_transaction(b"payload", 42)
+    tx_hash = state.add_transaction(tx)
+    block = _child_block(prev_hash=GENESIS_HASH, height=1, tx_hashes=(tx_hash,))
+
+    state.add_block(block)
+
+    assert state.mempool == {}
+
+
+def test_add_block_rejects_duplicate_block():
+    state = BlockchainState()
+    block = _child_block(prev_hash=GENESIS_HASH, height=1)
+    state.add_block(block)
+
+    result = state.add_block(block)
+
+    assert not result.accepted
+    assert result.reason == BLOCK_DUPLICATE
+    assert result.block_hash == block_hash(block)
+    assert not result.new_tip
+
+
+def test_add_block_rejects_unknown_parent():
+    state = BlockchainState()
+    block = _child_block(prev_hash=b"x" * 32, height=1)
+
+    result = state.add_block(block)
+
+    assert not result.accepted
+    assert result.reason == BLOCK_UNKNOWN_PARENT
+    assert state.height() == 0
+
+
+def test_add_block_rejects_wrong_height():
+    state = BlockchainState()
+    block = _child_block(prev_hash=GENESIS_HASH, height=2)
+
+    result = state.add_block(block)
+
+    assert not result.accepted
+    assert result.reason == BLOCK_BAD_HEIGHT
+    assert state.height() == 0
+
+
+def test_add_block_rejects_bad_pow():
+    state = BlockchainState()
+    block = Block(
+        height=1,
+        prev_hash=GENESIS_HASH,
+        tx_hashes=(),
+        timestamp=42,
+        difficulty=257,
+        nonce=0,
+    )
+
+    result = state.add_block(block)
+
+    assert not result.accepted
+    assert result.reason == BLOCK_BAD_POW
+    assert state.height() == 0
+
+
+def test_block_rejects_bad_transaction_hash_length_before_add():
+    with pytest.raises(ValueError, match="tx_hashes"):
+        Block(
+            height=1,
+            prev_hash=GENESIS_HASH,
+            tx_hashes=(b"short",),
+            timestamp=42,
+            difficulty=0,
+            nonce=0,
+        )
+
+
 def _signed_transaction(data: bytes, timestamp: int) -> Transaction:
     ensure_libsodium()
     private_key = default_eccrypto.generate_key("curve25519")
@@ -138,4 +249,20 @@ def _signed_transaction(data: bytes, timestamp: int) -> Transaction:
         data=data,
         timestamp=timestamp,
         signature=signature,
+    )
+
+
+def _child_block(
+    *,
+    prev_hash: bytes,
+    height: int,
+    tx_hashes: tuple[bytes, ...] = (),
+) -> Block:
+    return mine_block_candidate(
+        height=height,
+        prev_hash=prev_hash,
+        tx_hashes=tx_hashes,
+        timestamp=42 + height,
+        difficulty=0,
+        max_nonce=0,
     )
