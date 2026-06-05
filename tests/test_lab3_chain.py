@@ -127,6 +127,107 @@ def test_snapshot_mempool_rejects_invalid_limit(limit):
         state.snapshot_mempool(limit=limit)
 
 
+def test_build_candidate_block_points_to_current_genesis_tip():
+    state = BlockchainState()
+
+    candidate = state.build_candidate_block(
+        tx_hashes=(),
+        timestamp=100,
+        difficulty=0,
+        nonce=7,
+    )
+
+    assert candidate.height == 1
+    assert candidate.prev_hash == GENESIS_HASH
+    assert candidate.tx_hashes == ()
+    assert candidate.timestamp == 100
+    assert candidate.difficulty == 0
+    assert candidate.nonce == 7
+
+
+def test_build_candidate_block_uses_mempool_snapshot():
+    state = BlockchainState()
+    tx1 = _signed_transaction(b"payload-1", 42)
+    tx2 = _signed_transaction(b"payload-2", 43)
+    tx1_hash = state.add_transaction(tx1)
+    tx2_hash = state.add_transaction(tx2)
+
+    candidate = state.build_candidate_block(
+        tx_hashes=state.snapshot_mempool(),
+        timestamp=100,
+        difficulty=0,
+        nonce=0,
+    )
+
+    assert candidate.tx_hashes == (tx1_hash, tx2_hash)
+
+
+def test_built_candidate_can_be_accepted_when_pow_is_valid():
+    state = BlockchainState()
+    candidate = state.build_candidate_block(
+        tx_hashes=(),
+        timestamp=100,
+        difficulty=0,
+        nonce=0,
+    )
+
+    result = state.add_block(candidate)
+
+    assert result.accepted
+    assert result.new_tip
+    assert state.tip() == candidate
+
+
+def test_build_candidate_block_points_to_new_tip_after_append():
+    state = BlockchainState()
+    block = state.build_candidate_block(
+        tx_hashes=(),
+        timestamp=100,
+        difficulty=0,
+        nonce=0,
+    )
+    state.add_block(block)
+
+    candidate = state.build_candidate_block(
+        tx_hashes=(b"a" * 32,),
+        timestamp=101,
+        difficulty=0,
+        nonce=1,
+    )
+
+    assert candidate.height == 2
+    assert candidate.prev_hash == block_hash(block)
+    assert candidate.tx_hashes == (b"a" * 32,)
+
+
+def test_build_candidate_block_points_to_selected_tip_after_fork_switch():
+    state = BlockchainState()
+    block_a, block_b = _competing_height_one_blocks()
+    lower_hash_block, higher_hash_block = sorted(
+        (block_a, block_b),
+        key=block_hash,
+    )
+    state.add_block(lower_hash_block)
+    state.add_block(higher_hash_block)
+    side_child = _child_block(
+        prev_hash=block_hash(higher_hash_block),
+        height=2,
+        tx_hashes=(b"c" * 32,),
+    )
+    state.add_block(side_child)
+
+    candidate = state.build_candidate_block(
+        tx_hashes=(),
+        timestamp=200,
+        difficulty=0,
+        nonce=0,
+    )
+
+    assert state.tip() == side_child
+    assert candidate.height == 3
+    assert candidate.prev_hash == block_hash(side_child)
+
+
 def test_validate_block_accepts_valid_child_of_genesis():
     state = BlockchainState()
     block = _child_block(prev_hash=GENESIS_HASH, height=1)

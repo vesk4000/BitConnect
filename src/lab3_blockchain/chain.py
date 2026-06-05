@@ -95,6 +95,22 @@ class BlockchainState:
         validate_non_negative_int("limit", limit)
         return tuple(self.mempool)[:limit]
 
+    def build_candidate_block(
+        self,
+        tx_hashes: tuple[bytes, ...],
+        timestamp: int,
+        difficulty: int,
+        nonce: int,
+    ) -> Block:
+        return Block(
+            height=self.height() + 1,
+            prev_hash=self._tip_hash,
+            tx_hashes=tx_hashes,
+            timestamp=timestamp,
+            difficulty=difficulty,
+            nonce=nonce,
+        )
+
     def validate_block(self, block: Block) -> BlockValidationResult:
         validate_tx_hashes(block.tx_hashes)
         candidate_hash = block_hash(block)
