@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 
-UINT64_MAX = (1 << 64) - 1
+from .validation import UINT64_MAX, validate_bytes, validate_uint64
 
 
 @dataclass(frozen=True)
@@ -19,18 +19,15 @@ class Transaction:
 
     def __post_init__(self) -> None:
         validate_timestamp(self.timestamp)
-        _validate_bytes("sender_key", self.sender_key)
-        _validate_bytes("data", self.data)
-        _validate_bytes("signature", self.signature)
+        validate_bytes("sender_key", self.sender_key)
+        validate_bytes("data", self.data)
+        validate_bytes("signature", self.signature)
 
 
 def validate_timestamp(timestamp: int) -> None:
     """Validate that a timestamp can be encoded as uint64 big-endian."""
 
-    if not isinstance(timestamp, int) or isinstance(timestamp, bool):
-        raise TypeError("timestamp must be an integer")
-    if timestamp < 0 or timestamp > UINT64_MAX:
-        raise ValueError("timestamp must fit in unsigned 64 bits")
+    validate_uint64("timestamp", timestamp)
 
 
 def timestamp_bytes(timestamp: int) -> bytes:
@@ -87,8 +84,3 @@ def verify_transaction_signature(transaction: Transaction) -> bool:
         )
     except Exception:
         return False
-
-
-def _validate_bytes(field_name: str, value: bytes) -> None:
-    if not isinstance(value, bytes):
-        raise TypeError(f"{field_name} must be bytes")
