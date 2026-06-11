@@ -153,6 +153,33 @@ Each check is over the chain returned by your 3 nodes during one attempt:
 
 Each attempt requires all 3 of your nodes to be online and reachable for its duration (around 5 minutes). With automatic retries (up to 3 per registration) plus unlimited re-registration, you don't need to be online at any specific moment — just keep your nodes running until you receive the pass email.
 
+== Grading schema ==
+
+The official grading schema of this course is the following (week 1 material, slide 8):
+
+Quality of work (50 %)
+    Running code, live demo, functionality, question and answer quality 
+Quality of process (20 %) 
+    All decisions clearly explained, testing, stability, QA  
+Quality of planing (20 %) 
+     Progress reporting, effective group communication, regular meetings
+Quality of documentation and repo management (10 %) 
+    Clear instructions how to run, and what is does
+
+The majority of your grade consists of the "quality of the work".
+The group project consists of 3 parts. For each part you need to pass the
+automated testing infrastructure by implementing the given specification.
+Passing these tests is a requirement for obtaining a passing grade.
+You need to produce running code in this course.
+
+The specification of assignments mentions a pass/fail, but this is merely the running code and feature completeness. Translated, this exam rubric can be flatened to this one if you use agentic AI and code is fully functional:
+
+no pass | code is written by AI. No full understanding by student
+6       | code is mostly written by AI, contains also useless code
+7       | code is written by AI and nicely re-written by humans
+8       | code is written by AI and professional developer quality. High performance.
+8+..10  | Great code, clear, performant. Additional expansion and features required.
+
 ## Tips
 
 - Build the chain primitives first (block header packing, hashing, PoW search, the flat `txs_hash` commitment) and unit-test them before introducing peers.

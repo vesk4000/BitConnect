@@ -171,6 +171,44 @@ uv run lab2-prep \
 
 ---
 
+## Lab 3 - PoW Blockchain over IPv8
+
+Lab 3 builds a 3-node Proof-of-Work blockchain on top of IPv8. Each teammate runs one `lab3-node`; the nodes form a group blockchain that mines blocks (Part C), gossips transactions and blocks between teammates, converges on the longest chain, and answers the Lab 3 server's queries. A separate registration step tells the server which community to join. Part B (this implementation) covers the wire protocol, both IPv8 communities, server registration with retry, and all reactive consensus handlers; the proactive mining loop and periodic catch-up timer are added in Part C.
+
+### Run a node
+
+All three teammates start their nodes simultaneously (use different ports on the same machine):
+
+```powershell
+uv run lab3-node --pem lab1_identity.pem --ipv8-port 5010
+```
+
+For a local three-node setup, run each in its own terminal with ports `5010`, `5011`, and `5012`.
+
+### Register with the server
+
+Once all three nodes are online and reachable, any teammate can register the group:
+
+```powershell
+uv run lab3-node --pem lab1_identity.pem --group-id <YOUR_GROUP_ID> --register
+```
+
+Re-registering is allowed at any time and resets the server's retry counter.
+
+### Lab 3 Node Options
+
+- `--pem <path>` - Path to the local PEM key file (default: `lab1_identity.pem`)
+- `--group-id <id>` - Group identifier for registration (required with `--register`)
+- `--team-config <path>` - Path to the team JSON config (default: `lab2_team.json`)
+- `--community-id-hex <hex>` - Hex-encoded blockchain community ID (default: `ArcanumLab3Chain2026`)
+- `--ipv8-port <int>` - UDP port for IPv8 (default: IPv8 picks one automatically)
+- `--register` - Register this group's blockchain community with the Lab 3 server
+- `--debug` - Enable DEBUG-level logging
+
+See [`docs/Lab3-PartB.md`](docs/Lab3-PartB.md) for the full design document covering the two-overlay architecture, message protocol tables, reactive consensus flow, and trust-boundary decisions.
+
+---
+
 ## Troubleshooting
 
 - If no server response arrives, ensure your packet is sent with IPv8 authenticated messaging (`ez_send`, as implemented).
