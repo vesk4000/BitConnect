@@ -30,6 +30,7 @@ class Lab3Community(Community):
         super().__init__(settings)
         self.server_public_key: bytes = b""
         self.target_pubkeys: set[bytes] = set()
+        self.local_endpoint: tuple[str, int] | None = None
 
     # ------------------------------------------------------------------
     # Configuration setters
@@ -42,6 +43,11 @@ class Lab3Community(Community):
     def set_target_pubkeys(self, keys: set[bytes]) -> None:
         """Set the binary public keys of known teammates."""
         self.target_pubkeys = keys
+
+    def set_local_endpoint(self, host: str, port: int) -> None:
+        """Set the local endpoint (host:port) for peer discovery."""
+        self.local_endpoint = (host, port)
+        logger.info("Local endpoint set to %s:%d", host, port)
 
     # ------------------------------------------------------------------
     # Identity predicates
@@ -89,6 +95,64 @@ class Lab3Community(Community):
                 return peer
             await asyncio.sleep(0.1)
         return None
+
+    async def wait_for_teammate_peers(self, timeout: float = 120.0) -> bool:
+        """Wait until all known teammates are discovered, or timeout elapses.
+
+        Returns True if all teammates found, False on timeout.
+        Logs progress periodically.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        expected_count = len(self.target_pubkeys)
+
+        if expected_count == 0:
+            logger.warning("wait_for_teammate_peers: no target pubkeys set!")
+            return True
+
+        logger.info(
+            "Waiting for %d teammate peers (timeout: %.0fs)", expected_count, timeout
+        )
+        logger.info("Target pubkeys: %s", [pk.hex()[:16] for pk in self.target_pubkeys])
+
+        last_log_time = loop.time()
+        while loop.time() < deadline:
+            all_peers = self.get_peers()
+            found_peers = list(self._peers_for_targets())
+            found_count = len(found_peers)
+
+            if found_count >= expected_count:
+                logger.info("All %d teammates discovered!", found_count)
+                return True
+
+            # Log progress every 30 seconds
+            if loop.time() - last_log_time >= 30:
+                elapsed = loop.time() - (deadline - timeout)
+                logger.info(
+                    "Still waiting: %d/%d teammates discovered (%.0fs elapsed), total peers: %d",
+                    found_count,
+                    expected_count,
+                    elapsed,
+                    len(all_peers),
+                )
+                if all_peers:
+                    for peer in all_peers[:5]:  # Show first 5 peers
+                        logger.info(
+                            "  - Known peer: %s",
+                            peer.public_key.key_to_bin().hex()[:16],
+                        )
+                last_log_time = loop.time()
+
+            await asyncio.sleep(1.0)
+
+        logger.warning(
+            "Timeout waiting for teammate peers: only %d/%d found after %.0fs",
+            len(list(self._peers_for_targets())),
+            expected_count,
+            timeout,
+        )
+        logger.warning("Total peers known to IPv8: %d", len(self.get_peers()))
+        return False
 
     # ------------------------------------------------------------------
     # Hardened signature verification

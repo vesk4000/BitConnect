@@ -91,7 +91,7 @@ async def register_blockchain(
     requests, each with a *response_timeout* window.  Returns the first
     successful (or failed) server response, or None if every attempt times out.
     """
-    logger.info("Waiting for Lab 3 server peer (timeout=%.1fs)…", server_timeout)
+    logger.info("Waiting for Lab 3 server peer (timeout=%.1fs)...", server_timeout)
     server_peer = await overlay.wait_for_server_peer(server_timeout)
     if server_peer is None:
         logger.warning("Lab 3 server peer not found within %.1fs", server_timeout)

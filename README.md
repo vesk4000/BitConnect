@@ -205,7 +205,7 @@ Re-registering is allowed at any time and resets the server's retry counter.
 - `--register` - Register this group's blockchain community with the Lab 3 server
 - `--debug` - Enable DEBUG-level logging
 
-See [`docs/Lab3-PartB.md`](docs/Lab3-PartB.md) for the full design document covering the two-overlay architecture, message protocol tables, reactive consensus flow, and trust-boundary decisions.
+See [`docs/Lab3-Implementation.md`](docs/Lab3-Implementation.md) for the full design document covering the two-overlay architecture, message protocol tables, reactive consensus flow, and trust-boundary decisions.
 
 ---
 

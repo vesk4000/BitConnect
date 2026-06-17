@@ -64,6 +64,9 @@ def build_blockchain_community(
             super().__init__(settings)
             self.set_server_public_key(bytes.fromhex(LAB3_SERVER_PUBLIC_KEY_HEX))
             self.state: BlockchainState = BlockchainState()
+            # Remembers the last logged (local_tip, peer_tip) mismatch so we log
+            # a given divergence once rather than every status round.
+            self._last_mismatch_logged: tuple[bytes, bytes] | None = None
 
             # Server-path handlers
             self.add_message_handler(
@@ -92,6 +95,17 @@ def build_blockchain_community(
             """Replace the local BlockchainState (used by tests and service wiring)."""
             self.state = state
 
+        def _chain_summary(self) -> str:
+            """Compact one-line view of our current main chain for diagnostics."""
+            st = self.state
+            parts = []
+            for height in sorted(st.hash_by_height):
+                bh = st.hash_by_height[height]
+                block = st.blocks_by_hash[bh]
+                ntx = len(block.tx_hashes)
+                parts.append(f"#{height}:{bh.hex()[:8]}({ntx}tx)")
+            return " -> ".join(parts) if parts else "<empty>"
+
         # ------------------------------------------------------------------
         # Server-path handlers
         # ------------------------------------------------------------------
@@ -102,6 +116,7 @@ def build_blockchain_community(
         ) -> None:
             """Accept a signed transaction from the server and gossip it to teammates."""
             if not self._is_server(peer):
+                logger.warning("SubmitTransaction from NON-server peer ignored")
                 return
             tx = Transaction(
                 sender_key=bytes(payload.sender_key),
@@ -112,11 +127,23 @@ def build_blockchain_community(
             try:
                 tx_hash = self.state.add_transaction(tx)
             except ValueError:
+                logger.warning(
+                    "<<< SERVER SubmitTransaction REJECTED (bad signature); "
+                    "replied success=False"
+                )
                 self.ez_send(
                     peer,
                     SubmitTransactionResponsePayload(False, b"", "invalid signature"),
                 )
                 return
+            logger.info(
+                "<<< SERVER SubmitTransaction: tx=%s (%dB data) | replied "
+                "success=True | mempool=%d chain=%s",
+                tx_hash.hex()[:12],
+                len(tx.data),
+                len(self.state.mempool),
+                self._chain_summary(),
+            )
             self.ez_send(
                 peer,
                 SubmitTransactionResponsePayload(True, tx_hash, "accepted"),
@@ -130,6 +157,13 @@ def build_blockchain_community(
             """Return current chain height and tip hash to the server."""
             if not self._is_server(peer):
                 return
+            logger.info(
+                "<<< SERVER GetChainHeight(req=%d) | replied height=%d tip=%s | chain=%s",
+                int(payload.request_id),
+                self.state.height(),
+                self.state.tip_hash.hex()[:12],
+                self._chain_summary(),
+            )
             self.ez_send(
                 peer,
                 ChainHeightResponsePayload(
@@ -146,7 +180,18 @@ def build_blockchain_community(
                 return
             block = self.state.get_block_by_height(int(payload.height))
             if block is None:
+                logger.info(
+                    "<<< SERVER GetBlock(height=%d) | MISSING (our height=%d) - no reply",
+                    int(payload.height),
+                    self.state.height(),
+                )
                 return
+            logger.info(
+                "<<< SERVER GetBlock(height=%d) | replied hash=%s (%d tx)",
+                int(payload.height),
+                self.state.hash_by_height[block.height].hex()[:12],
+                len(block.tx_hashes),
+            )
             self.ez_send(peer, BlockResponsePayload(**block_to_response_fields(block)))
 
         # ------------------------------------------------------------------
@@ -195,14 +240,34 @@ def build_blockchain_community(
             )
             if block is None:
                 # Codec detected a hash mismatch or structural error — discard.
-                logger.debug("Dropping block payload that failed codec validation")
+                logger.warning("Dropping peer block that failed codec validation")
                 return
+            tip_before = self.state.tip_hash
             result = self.state.add_block(block)
             if result.accepted:
+                if self.state.tip_hash != tip_before:
+                    logger.info(
+                        "Applied peer block #%d %s -> NEW TIP height=%d tip=%s",
+                        block.height,
+                        result.block_hash.hex()[:8],
+                        self.state.height(),
+                        self.state.tip_hash.hex()[:12],
+                    )
+                else:
+                    logger.debug(
+                        "Applied peer block #%d %s (side branch; tip unchanged)",
+                        block.height,
+                        result.block_hash.hex()[:8],
+                    )
                 self.gossip_block(block, exclude=peer.public_key.key_to_bin())
             elif result.reason == BLOCK_UNKNOWN_PARENT and block.height > 0:
                 # Ask the sender for the missing ancestor so we can reconnect
                 # this orphan to the main chain.
+                logger.debug(
+                    "Orphan peer block #%d (unknown parent); requesting height %d",
+                    block.height,
+                    block.height - 1,
+                )
                 try:
                     self.ez_send(peer, PeerBlockRequestPayload(block.height - 1))
                 except Exception as exc:
@@ -244,19 +309,44 @@ def build_blockchain_community(
         def on_peer_status_response(
             self, peer: Peer, payload: PeerStatusResponsePayload
         ) -> None:
-            """If the peer is ahead, request all blocks we are missing."""
+            """Converge chains whenever the peer's tip differs from ours.
+
+            Strategy (simple and robust to forks of any depth): if the peer's
+            tip hash differs from ours at all, request its entire main chain
+            (heights 1..peer_height). Every block we receive is fed into our
+            local tree - duplicates are ignored, missing branches get filled in
+            - and then our deterministic fork-choice rule (longest chain, with a
+            lexicographic tie-break on equal height) independently selects the
+            same canonical tip on every node. One request burst converges trees
+            of any divergence depth, with no sequential ancestor walk-back.
+            """
             if not self._is_teammate(peer):
                 return
             peer_height = int(payload.height)
-            local_height = self.state.height()
-            if peer_height > local_height:
-                for h in range(local_height + 1, peer_height + 1):
-                    try:
-                        self.ez_send(peer, PeerBlockRequestPayload(h))
-                    except Exception as exc:
-                        logger.debug(
-                            "Failed to send block request for height %d: %s", h, exc
-                        )
+            peer_tip_hash = bytes(payload.tip_hash)
+
+            # Nothing to do if we already agree on the tip.
+            if peer_tip_hash == self.state.tip_hash:
+                self._last_mismatch_logged = None
+                return
+
+            mismatch_key = (self.state.tip_hash, peer_tip_hash)
+            if mismatch_key != self._last_mismatch_logged:
+                logger.info(
+                    "Tip MISMATCH vs teammate: peer height=%d tip=%s | local "
+                    "height=%d tip=%s -> requesting peer chain 1..%d",
+                    peer_height,
+                    peer_tip_hash.hex()[:12],
+                    self.state.height(),
+                    self.state.tip_hash.hex()[:12],
+                    peer_height,
+                )
+                self._last_mismatch_logged = mismatch_key
+            for h in range(1, peer_height + 1):
+                try:
+                    self.ez_send(peer, PeerBlockRequestPayload(h))
+                except Exception as exc:
+                    logger.debug("Failed to request block at height %d: %s", h, exc)
 
         @lazy_wrapper(PeerBlockRequestPayload)
         def on_peer_block_request(
@@ -309,7 +399,11 @@ def build_blockchain_community(
             has a longer chain.
             """
             payload = PeerStatusRequestPayload(request_id)
-            for peer in self._peers_for_targets():
+            peers = list(self._peers_for_targets())
+            logger.debug(
+                "broadcast_status_request: found %d peers for targets", len(peers)
+            )
+            for peer in peers:
                 try:
                     self.ez_send(peer, payload)
                 except Exception as exc:

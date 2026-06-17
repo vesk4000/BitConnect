@@ -19,9 +19,13 @@ lab1 = "lab1_pow_ipv8.main:main"
 lab2-prep = "lab2_relay_race.prep_cli:main"
 lab2-race = "lab2_relay_race.race_cli:main"
 lab3-node = "lab3_blockchain.cli:main"
+lab3-run-local = "lab3_blockchain.run_lab3_nodes:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+lab3_blockchain = ["bootstrap_servers.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

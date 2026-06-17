@@ -1,0 +1,16 @@
+{
+  "_comment": "Seed addresses we walk to in order to discover peers (the Lab 3 server and our teammates). These are NOT registered as IPv8 'formal' bootstrappers (which would blacklist them and hide them from get_peers); instead we walk_to them ourselves so every discovered node - server and teammates alike - is treated uniformly and filtered purely by public key / community. Dead seeds are harmless: they simply never respond. Any working bootstrap server in our community can introduce us to the rest; the professor's server just happens to be the one that is currently alive.",
+  "bootstrap_servers": [
+    { "host": "dispersy1.tribler.org", "port": 6421 },
+    { "host": "dispersy2.tribler.org", "port": 6422 },
+    { "host": "dispersy3.tribler.org", "port": 6423 },
+    { "host": "dispersy4.tribler.org", "port": 6424 },
+    { "host": "dispersy1.st.tudelft.nl", "port": 6421 },
+    { "host": "dispersy2.st.tudelft.nl", "port": 6422 },
+    { "host": "130.161.119.206", "port": 6421 },
+    { "host": "130.161.119.206", "port": 6422 },
+    { "host": "131.180.27.155", "port": 6423 },
+    { "host": "131.180.27.156", "port": 6424 },
+    { "host": "64.130.52.136", "port": 8092 }
+  ]
+}

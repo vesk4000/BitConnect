@@ -10,3 +10,5 @@ vendor/libsodium/
 *.pem
 md/
 .lab2_server_hint.json
+lab2_server_hint.json
+*_node.log
